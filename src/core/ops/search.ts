@@ -12,7 +12,7 @@ import { readHolders } from './context.ts';
 
 import { hybridSearchCached, stampContentFlags, stampUnverifiedExtractions } from '../search/hybrid.ts';
 import { markdownForHydraRows } from '../hydradb-response.ts';
-import { enforceTokenBudget } from '../search/token-budget.ts';
+import { deliverHydraEvidence, hydraEvidencePlan } from '../search/hydra-evidence.ts';
 import { hydraPrimaryEnabled, usesHydraSearch } from '../search/hydra-primary.ts';
 import { anchorOpResults } from '../search/entity-anchor.ts';
 import { applyQueryArms } from '../search/query-arms.ts';
@@ -181,10 +181,9 @@ async function evidencePlanFor(ctx: OperationContext, p: Record<string, unknown>
  */
 async function withEvidence(ctx: OperationContext, p: Record<string, unknown>, results: SearchResult[], plan: EvidencePlan | null,
   scope: DeliveryScope, meta: HybridSearchMeta | null): Promise<{ rows: SearchResult[]; evidence?: { delivery: DeliveryMeta; explicitSnippet: boolean } }> {
-  if (usesHydraSearch(meta)) return { rows: plan?.budgetExplicit ? enforceTokenBudget(results, plan.budgetTokens).results : results };
-  const applied = effectivePlan(plan, results);
+  const applied = effectivePlan(usesHydraSearch(meta) ? hydraEvidencePlan(plan) : plan, results);
   if (!applied) return { rows: results };
-  const d = await deliverEvidence(ctx.engine, results, applied, { ...scope, requireSafeChunks: ctx.remote !== false }, { liveHits: meta?.cache?.status !== 'hit' });
+  const d = await (usesHydraSearch(meta) ? deliverHydraEvidence : deliverEvidence)(ctx.engine, results, applied, { ...scope, requireSafeChunks: ctx.remote !== false }, { liveHits: meta?.cache?.status !== 'hit' });
   return { rows: d.results, evidence: { delivery: d.delivery, explicitSnippet: typeof p.snippet_chars === 'number' && Number.isFinite(p.snippet_chars) } };
 }
 

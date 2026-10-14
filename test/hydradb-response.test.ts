@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { hydraHits, hydraRelatedHits, hydraMarkdown, attachHydraMarkdown, markdownForHydraRows } from '../src/core/hydradb-response.ts';
+import { hydraHits, hydraRelatedHits, hydraMarkdown, attachHydraMarkdown, markdownForHydraRows, carryHydraRenderers } from '../src/core/hydradb-response.ts';
 
 const source = (id: string) => ({ id, title: `Source ${id}`, additional_metadata: { gbrain_source: 'public-fixtures', gbrain_slug: `notes/${id}` } });
 
@@ -34,4 +34,20 @@ test('post-retrieval redaction, truncation and budget disable whole server Markd
   expect(markdownForHydraRows([{ title: 'Allowed', chunk_text: 'Redacted evidence.' }], rows)).not.toContain('WHOLE_SERVER_PROMPT');
   expect(markdownForHydraRows(rows, rows, true)).toBe('Full evidence.');
   expect(markdownForHydraRows([], rows)).not.toContain('WHOLE_SERVER_PROMPT');
+});
+
+test('expanded evidence respects stale revisions and explicit presentation budgets', () => {
+  const response = { sources: [source('a')], chunks: [{ id: 'a', chunk_uuid: 'ca', chunk_content: 'Ranked passage.',
+    additional_metadata: { ...source('a').additional_metadata, gbrain_revision: 'revision-one' } }],
+    graph_context: { query_paths: [{ source_chunk_ids: ['ca'], combined_context: 'ORIGINAL_GRAPH', triplets: [] }] } };
+  const hits = hydraHits(response);
+  const original = [{ slug: 'notes/a', source_id: 'public-fixtures', chunk_id: 1, title: 'Source a', chunk_text: 'Ranked passage.' }];
+  attachHydraMarkdown(original, hits, [], new Set(['a', 'ca']), hits);
+  const expanded = [{ ...original[0], chunk_text: 'Authoritative full page.', delivered: { unit: 'page', revision: 'revision-one', truncated: false } }];
+  carryHydraRenderers(expanded as never, original as never);
+  expect(markdownForHydraRows(expanded)).toContain('ORIGINAL_GRAPH');
+  expect(markdownForHydraRows(expanded, expanded, true)).toBe('Authoritative full page.');
+  expanded[0]!.delivered.revision = 'revision-two';
+  expect(markdownForHydraRows(expanded)).not.toContain('ORIGINAL_GRAPH');
+  expect(markdownForHydraRows(expanded)).toContain('Authoritative full page.');
 });

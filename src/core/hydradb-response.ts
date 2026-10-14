@@ -1,11 +1,14 @@
 /** HydraDB's structured evidence and SDK Markdown rendering, after local admission. */
 import { buildString } from '@hydradb/sdk/helpers';
 import type { HydraHit } from './hydradb.ts';
+import type { SearchResult } from './types.ts';
 
 type RecordValue = Record<string, any>;
 export interface HydraResponse extends RecordValue { chunks?: RecordValue[]; sources?: RecordValue[]; llm_prompt?: string }
 export interface HydraEvidence { response: HydraResponse; chunk: RecordValue; aliases: string[] }
 export const HYDRA_MARKDOWN = Symbol('hydradb-markdown');
+const HYDRA_RENDERER = Symbol('hydradb-renderer');
+type Render = (row: SearchResult) => string;
 interface Presentation { markdown: string; texts: string[] }
 
 /** Metadata may live on a source rather than repeated on every chunk. */
@@ -83,7 +86,11 @@ export function hydraMarkdown(hit: HydraHit, text: string, admitted: Set<string>
 /** Save the canonical server Markdown only when its entire evidence set survived admission. */
 export function attachHydraMarkdown(rows: object[], hits: HydraHit[], related: HydraHit[], admitted: Set<string>, selected: HydraHit[], budget?: number): void {
   const response = hits[0]?.evidence?.response;
-  for (const row of rows) Object.assign(row, { [HYDRA_MARKDOWN]: true });
+  rows.forEach((row, i) => Object.assign(row, { [HYDRA_MARKDOWN]: true, [HYDRA_RENDERER]: (shown: SearchResult) => {
+    const hit = selected[i]!;
+    const fresh = !shown.delivered?.revision || shown.delivered.revision === hit.metadata.gbrain_revision;
+    return fresh ? hydraMarkdown({ ...hit, title: shown.title ?? hit.title }, shown.chunk_text, admitted, [...hits, ...related]) : shown.chunk_text;
+  } }));
   if (!rows.length || budget || !response?.llm_prompt || hits.length !== selected.length || related.some(h => !h.evidence?.aliases.every(id => admitted.has(id)))) return;
   const all = [...hits, ...related];
   if ((response.chunks?.length ?? 0) !== hits.length || (response.sources ?? []).some(s => !admitted.has(s.id))) return;
@@ -109,5 +116,18 @@ export function markdownForHydraRows(rows: Array<{ chunk_text?: string; chunk?: 
   const texts = rows.map(r => r.chunk_text ?? r.chunk ?? '');
   if (budgeted) return texts.join('\n\n');
   if (presentation && typeof presentation === 'object' && texts.length === presentation.texts.length && texts.every((text, i) => text === presentation.texts[i])) return presentation.markdown;
-  return texts.length ? '# HydraDB context\n\n' + texts.map((text, i) => `## ${i + 1}. ${rows[i]!.title ?? 'Memory'}\n\n${text}`).join('\n\n') : '# HydraDB context\n\nNo matching memory found.';
+  const formatted = rows.map((row, i) => {
+    const source = original.find(r => (r as SearchResult).slug === (row as SearchResult).slug && (r as SearchResult).source_id === (row as SearchResult).source_id) as (SearchResult & { [HYDRA_RENDERER]?: Render }) | undefined;
+    const delivery = (row as SearchResult).delivered;
+    return source?.[HYDRA_RENDERER] && delivery && delivery.unit !== 'chunk' && !delivery.truncated ? source[HYDRA_RENDERER](row as SearchResult) : texts[i];
+  });
+  return texts.length ? '# HydraDB context\n\n' + formatted.map((text, i) => `## ${i + 1}. ${rows[i]!.title ?? 'Memory'}\n\n${text}`).join('\n\n') : '# HydraDB context\n\nNo matching memory found.';
+}
+
+/** Delivery redacts/copies rows, so retain formatting separately from its authoritative text and match spans. */
+export function carryHydraRenderers(rows: SearchResult[], original: SearchResult[]): void {
+  for (const row of rows) {
+    const source = original.find(r => r.slug === row.slug && r.source_id === row.source_id && r.chunk_id === row.chunk_id) as (SearchResult & { [HYDRA_RENDERER]?: Render }) | undefined;
+    if (source?.[HYDRA_RENDERER]) Object.assign(row, { [HYDRA_RENDERER]: source[HYDRA_RENDERER], [HYDRA_MARKDOWN]: true });
+  }
 }

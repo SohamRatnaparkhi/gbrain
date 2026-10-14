@@ -105,7 +105,9 @@ HydraDB's response includes Markdown and structured evidence. GBrain uses the
 server's Markdown when all evidence survives the caller's access rules and
 output limits. When results are filtered, stale or budgeted, it rebuilds the
 allowed context using HydraDB's SDK `buildString`, retaining authorized graph
-and dated evidence. CLI text and stdio MCP return readable Markdown. JSON CLI
+and dated evidence. Explicit page, section and window requests still expand
+locally held pages under the caller's access rules; structured match spans
+refer to that authoritative text, and Markdown retains permitted cloud context. CLI text and stdio MCP return readable Markdown. JSON CLI
 output and MCP structured results remain available; HTTP MCP also includes a
 Markdown content block while preserving the existing JSON block for clients.
 

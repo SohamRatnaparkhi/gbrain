@@ -23,6 +23,7 @@ import { runCloud } from '../src/commands/cloud.ts';
 import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
 import { drainAllBackgroundWorkForCliExit } from '../src/core/background-work.ts';
 import type { SearchResult } from '../src/core/types.ts';
+import { installFixtureChunks } from './helpers/page-projection.ts';
 import { newSource, page, putPage } from './helpers/pinned-questions-fixture.ts';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -473,4 +474,41 @@ test('unified graph supporting contexts resolve source metadata before admission
   expect(cloud.calls).toContain('POST /context/list');
   expect(JSON.stringify(rows)).toContain('Unified authorized synthesis.');
   expect(JSON.stringify(rows)).toContain('The owner is team-example.');
+});
+
+test('cloud query, search and recall honor page, section and window delivery with readable graph context', async () => {
+  const slug = 'notes/expanded-offsite';
+  const pieces = ['WINDOW_EARLIER: travel is by train.', 'The Forge offsite is booked in Santa Fe.',
+    'SECTION_DETAIL: the check-in desk opens at noon.', 'LATER_DETAIL: transport leaves at five.', 'PAGE_ONLY_DETAIL: refunds close next month.'];
+  const body = '## Earlier\n' + pieces[0] + '\n\n## Plan\n' + pieces[1] + '\n\n' + pieces[2] + '\n\n## Later\n' + pieces[3] + '\n\n## Appendix\n' + pieces[4];
+  await putPage(engine, sourceId, slug, page('note', 'Expanded offsite', body));
+  await installFixtureChunks(engine, slug, pieces.map((chunk_text, chunk_index) => ({ chunk_text, chunk_index, chunk_source: 'compiled_truth' })), { sourceId });
+  await connectAll(); await mirrorBrain(engine, conn, { full: true });
+  const id = hydraDocId(sourceId, slug), doc = cloud.docs.get(id)!;
+  cloud.docs.clear(); cloud.docs.set(id, doc);
+  cloud.responseExtras = { llm_prompt: 'MATCH_ONLY_PROMPT', chunks: [{ id, chunk_uuid: 'expanded-chunk', source_title: doc.title,
+    chunk_content: pieces[1], additional_metadata: doc.meta }], graph_context: { query_paths: [{ source_chunk_ids: ['expanded-chunk'],
+    combined_context: 'AUTHORIZED_EXPANDED_GRAPH', triplets: [] }], chunk_relations: [], chunk_id_to_group_ids: {} } };
+  for (const op of ['query', 'search', 'recall']) {
+    for (const unit of ['page', 'section', 'window']) {
+      const result = await dispatchToolCall(engine, op, { query: Q, source_id: sourceId, limit: 1, expand: false,
+        return_unit: unit, return_window: 1, fields: 'full', snippet_chars: 0 },
+        { transport: 'stdio', remote: false, sourceId, config: { engine: engine.kind } as never, logger: { info() {}, warn() {}, error() {} } });
+      expect(result.isError).not.toBe(true);
+      const structured = unpackToolResult<any>(result);
+      const rows = op === 'recall' ? structured.results : structured;
+      expect(rows).toHaveLength(1);
+      const delivered = rows[0], text = delivered.chunk_text ?? delivered.chunk;
+      expect(delivered.delivered?.unit).toBe(unit);
+      expect(text).toContain('SECTION_DETAIL');
+      expect(result.content[0]!.text).toContain('SECTION_DETAIL');
+      expect(result.content[0]!.text).toContain('AUTHORIZED_EXPANDED_GRAPH');
+      expect(result.content[0]!.text).not.toContain('MATCH_ONLY_PROMPT');
+      if (unit === 'page') expect(text).toContain('PAGE_ONLY_DETAIL');
+      else expect(text).not.toContain('PAGE_ONLY_DETAIL');
+      if (unit === 'window') expect(text).toContain('WINDOW_EARLIER');
+      if (unit === 'section') expect(text).not.toContain('WINDOW_EARLIER');
+      for (const span of delivered.delivered.match_spans) expect(text.slice(span.start, span.end)).toBe(pieces[1]);
+    }
+  }
 });

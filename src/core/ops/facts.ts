@@ -29,6 +29,7 @@ import { assertExplicitSourceLive, federatedSearchScope, parseSourceIdParam, sou
 import { markKeywordHits } from '../search/evidence.ts';
 import { hybridSearchCached, stampContentFlags, type HybridSearchOpts } from '../search/hybrid.ts';
 import { markdownForHydraRows } from '../hydradb-response.ts';
+import { deliverHydraEvidence, hydraEvidencePlan } from '../search/hydra-evidence.ts';
 import { hydraPrimarySearch } from '../search/hydra-primary.ts';
 import { dedupResults } from '../search/dedup.ts';
 import { bumpLastRetrievedAt } from '../last-retrieved.ts';
@@ -519,8 +520,8 @@ const recall: Operation = {
       searchResults = found.results; searchDegraded = found.degraded;
       cloud.mode = found.mode; cloud.original = searchResults;
       bumpLastRetrievedAt(ctx.engine, searchResults.map(r => r.page_id));
-      const applied = recallDeliveryPlan(effectivePlan(evidencePlan, searchResults), p.budget_policy, queryText, budgetTokens, rows);
-      if (applied && !cloud.mode) ({ results: searchResults, delivery } = await deliverEvidence(ctx.engine, searchResults, applied, { ...searchScope, excludePrivate, requireSafeChunks: ctx.remote !== false }));
+      const applied = recallDeliveryPlan(effectivePlan(cloud.mode ? hydraEvidencePlan(evidencePlan) : evidencePlan, searchResults), p.budget_policy, queryText, budgetTokens, rows);
+      if (applied) ({ results: searchResults, delivery } = await (cloud.mode ? deliverHydraEvidence : deliverEvidence)(ctx.engine, searchResults, applied, { ...searchScope, excludePrivate, requireSafeChunks: ctx.remote !== false }));
       searchResults = await stampPageTrust(ctx.engine, searchResults, eligibility.floor);
     }
 
