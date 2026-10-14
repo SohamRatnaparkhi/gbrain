@@ -569,7 +569,8 @@
           "database_path?: string | undefined",
           "database_url?: string | undefined",
           "engine?: \"postgres\" | \"pglite\" | undefined",
-          "keyword_statement_timeout_ms?: number | undefined"
+          "keyword_statement_timeout_ms?: number | undefined",
+          "pglite_shared_buffers?: string | undefined"
         ],
         "name": "EngineConfig"
       },
@@ -8327,7 +8328,8 @@
           "database_path?: string | undefined",
           "database_url?: string | undefined",
           "engine?: \"postgres\" | \"pglite\" | undefined",
-          "keyword_statement_timeout_ms?: number | undefined"
+          "keyword_statement_timeout_ms?: number | undefined",
+          "pglite_shared_buffers?: string | undefined"
         ],
         "name": "EngineConfig"
       },

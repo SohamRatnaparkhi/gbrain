@@ -43,7 +43,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import { LANE_BUSY, type ConsumerStatus, type PersistenceConsumer, type PersistenceConsumerLike } from './consumer.ts';
 import {
-  CONSUMER_LAPSED_MS, CONSUMER_LIVE_MS, consumerIdentity, consumerWedged, listHostConsumers, RESIDENT_CONSUMER_KINDS, startConsumerHeartbeat,
+  CONSUMER_LAPSED_MS, CONSUMER_LIVE_MS, consumerIdentity, consumerRowProvablyDead, consumerWedged, listHostConsumers, RESIDENT_CONSUMER_KINDS, startConsumerHeartbeat,
   type ConsumerHeartbeat, type ConsumerPool, type ConsumerProcessIdentity, type ListedConsumer,
 } from './consumer-heartbeat.ts';
 import { DEFAULT_PREPARATION_POLICY } from './preparation-budget.ts';
@@ -73,12 +73,13 @@ export interface ElectedOwner { kind: string; pid: number; nonce: string; pid_ns
 /**
  * The owner to defer to among `rows`, or null: a resident-kind row that is not this process, in mode `full` or `promoted`,
  * not wedged and live (renewed within `CONSUMER_LIVE_MS`); the current owner is kept while it is merely stale (under
- * `CONSUMER_LAPSED_MS`), so one slow renewal does not promote every waiter on the host.
+ * `CONSUMER_LAPSED_MS`), so one slow renewal does not promote every waiter on the host. #6650: a row whose process this
+ * one can prove dead (`consumerRowProvablyDead`) is never elected or kept, however recently it renewed.
  */
 export function electOwner(rows: readonly ListedConsumer[], current: Pick<ListedConsumer, 'pid' | 'nonce'> | null, ceilingMs: number,
   self: ConsumerProcessIdentity = consumerIdentity()): ListedConsumer | null {
   const eligible = rows.filter(row => !(row.pid === self.pid && row.nonce === self.nonce) && RESIDENT_CONSUMER_KINDS.includes(row.kind)
-    && (row.mode === 'full' || row.mode === 'promoted') && !consumerWedged(row, ceilingMs));
+    && (row.mode === 'full' || row.mode === 'promoted') && !consumerWedged(row, ceilingMs) && !consumerRowProvablyDead(row, self));
   const kept = current ? eligible.find(row => row.pid === current.pid && row.nonce === current.nonce && row.renewed_age_ms < CONSUMER_LAPSED_MS) : undefined;
   if (kept) return kept;
   return eligible.find(row => row.renewed_age_ms < CONSUMER_LIVE_MS) ?? null;

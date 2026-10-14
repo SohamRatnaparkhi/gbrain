@@ -2289,6 +2289,8 @@ export interface EngineConfig {
   engine?: 'postgres' | 'pglite';
   /** #6495 file-plane `search.keyword_statement_timeout_ms`, read by the Postgres engine at connect (postgres-engine/keyword-statement-timeout.ts). */
   keyword_statement_timeout_ms?: number;
+  /** PGLite `shared_buffers` for this open (e.g. '32MB'); unset keeps the data directory's setting. */
+  pglite_shared_buffers?: string;
 }
 
 // Errors

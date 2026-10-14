@@ -405,7 +405,7 @@ async function main() {
   if (strictRefusal) exitCliError(strictRefusal, command);
 
   // A command that opens the local PGLite brain compiles its WASM off the main thread while its modules load (connect awaits the same promise).
-  const prewarm = (cliOps.has(command) || cliAliases.has(command) || findCliCommand(command)?.phase === 'post-connect') && loadConfig();
+  const prewarm = (cliOps.has(command) || cliAliases.has(command) || findCliCommand(command)?.phase === 'post-connect' || findCliCommand(command)?.dispatchedBy === 'deferred-persistence') && loadConfig();
   if (prewarm && prewarm.engine === 'pglite' && prewarm.database_path) void import('../core/pglite-embedded-assets.ts').then(m => m.getEmbeddedPgliteOptions()).catch(() => {});
 
   // T5 — `gbrain search modes|stats|tune` is the read-only config dashboard,
@@ -617,7 +617,7 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
   }
 
   // No live serve owns the selected brain; connect through the normal lock path.
-  const engine = await connectEngine();
+  const engine = await connectEngine({ oneShotRead: op.scope === 'read' });
   // #2084: the teardown contract (bounded drain of every background-work sink,
   // bounded disconnect, computed-deadline backstop) lives in finishCliTeardown
   // — see src/core/cli-force-exit.ts for the full design. The hard-deadline
@@ -2394,7 +2394,7 @@ async function runReadOnlyTimeoutDispatch(command: string, args: string[]): Prom
     const label = `gbrain ${command}`;
     let engine: BrainEngine;
     try {
-      engine = await withTimeout(connectEngine(), readOnlyTimeoutMs, `${label}: connect`);
+      engine = await withTimeout(connectEngine({ oneShotRead: command === 'search' || args[0] === 'list' || args[0] === undefined }), readOnlyTimeoutMs, `${label}: connect`);
     } catch (e) {
       if (e instanceof OperationTimeoutError) {
         const hint = userTimeoutMs ? '' : ` (default ${e.ms}ms; pass --timeout=Ns to override)`;
@@ -2749,7 +2749,7 @@ async function dispatchReadOnlyCommand(engine: BrainEngine, command: string, arg
 // re-exported) so cli.ts's own connectEngine() call sites bind it locally.
 import { buildGatewayConfig } from '../core/ai/build-gateway-config.ts';
 export { buildGatewayConfig };
-import { connectEngineForServe, noBrainError, type EngineConnectHooks } from '../core/engine-connect.ts';
+import { connectEngineForServe, noBrainError, type EngineConnectHooks, type EngineConnectOptions } from '../core/engine-connect.ts';
 
 /**
  * Which brain this process's engine targets. Set by connectEngine after brain
@@ -2795,7 +2795,7 @@ async function connectMountEngine(brainId: string): Promise<BrainEngine> {
   return handle.engine;
 }
 
-async function connectEngine(opts?: { probeOnly?: boolean }): Promise<BrainEngine> {
+async function connectEngine(opts?: EngineConnectOptions): Promise<BrainEngine> {
   // Brain axis: resolve WHICH DATABASE this invocation targets before touching
   // the host engine. --brain (global flag) / GBRAIN_BRAIN_ID / .gbrain-mount /
   // mount-path-prefix resolve via the canonical 6-tier chain — the mirror of

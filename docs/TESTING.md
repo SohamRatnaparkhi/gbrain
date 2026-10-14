@@ -557,8 +557,8 @@ nested transaction confinement and the Postgres resident-stop barrier.
 
 ### Durable persistence schedules and process crashes
 
-Persistence suites (native-matrix publication, managed writers, schedules, crash boundaries, the runtime
-matrix and read latency) are described in [scripts/persistence/README.md](../scripts/persistence/README.md#test-suites).
+Persistence suites (native-matrix publication, managed writers, schedules, crash boundaries, runtime
+matrix, read latency, convergence) live in [scripts/persistence/README.md](../scripts/persistence/README.md#test-suites).
 
 ### Engine graduation
 

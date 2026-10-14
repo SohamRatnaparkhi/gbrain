@@ -90,6 +90,8 @@ export const PERSISTENCE_CONSUMERS_TABLE_SQL = `CREATE TABLE IF NOT EXISTS persi
     persistence_home text NOT NULL,
     minted_under jsonb,
     version text NOT NULL,
+    boot_id text,
+    process_start text,
     PRIMARY KEY(host_id,pid,nonce)
   )`;
 /** Indexes the Postgres blob omits because a migration builds them CONCURRENTLY. */

@@ -6,7 +6,7 @@ import { localHostId } from './identity.ts';
 import { executeClaimedGroup, PAGE_BATCH_GROUP_MAX, publishSingleWrite, singleWrite } from './group-publish.ts';
 import { preparationConfigView } from './config-snapshot.ts';
 import { CLAIM_LOST, DEFAULT_CLAIM_LEASE_TIMING, endLostLease, holdClaimForPublication, startClaimLease, type ClaimLeaseTiming } from './claim-lease.ts';
-import { claimPhaseStamp, claimStateOf, claimTripleText, EXPIRED_PREPARING_CHARGE_SQL, enterClaimPhase, startClaimPhase, type ClaimPhaseClock, type WaitingOn } from './claim-phase.ts';
+import { claimOwnerProvablyDead, claimPhaseStamp, claimStateOf, claimTripleText, EXPIRED_PREPARING_CHARGE_SQL, enterClaimPhase, startClaimPhase, type ClaimPhaseClock, type WaitingOn } from './claim-phase.ts';
 import { DEFAULT_PREPARATION_POLICY, preparationBudgetMs, preparationKind, startPreparation, type PreparationPolicy } from './preparation-budget.ts';
 import { isTerminal, type WriteRequest } from './model.ts';
 import { ownerExceptionLogText } from './publication-failure.ts';
@@ -50,6 +50,8 @@ export const DEFAULT_ZOMBIE_CAP = 1;
 /** An effects drain running this long names itself on stderr (serve), then again at this cadence. */
 const DRAIN_NOTICE_AFTER_MS = 5_000;
 const DRAIN_NOTICE_EVERY_MS = 10_000;
+/** #6650: how often a consumer looks for claims held by an owner it can prove dead. */
+export const DEAD_OWNER_SCAN_MS = 5_000;
 const yieldToEventLoop = () => new Promise<void>(resolve => setImmediate(resolve));
 /** When this process started; on PGLite no claim written earlier can belong to a live owner. */
 const PROCESS_STARTED_AT = new Date(performance.timeOrigin);
@@ -187,6 +189,9 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
   /** Requests this consumer claimed ahead of a queued sync row of their root. */
   private passedSync = new Set<string>();
   private rootRetryAfter = new Map<string, number>();
+  private deadOwnerScanAt = 0;
+  /** #6650: the dead owners (`deadOwnerClaims`) an idle tick found, handed to that tick's expired-claim reclaim. */
+  private deadOwnersSeen: string[] | null = null;
   private projectionWorker: Promise<unknown> | undefined;
   private effectsWorker: Promise<void> | undefined;
   private draining: { since: number; settled: number; ran: number; noticedAt: number } | undefined;
@@ -476,7 +481,9 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
         return;
       }
       if (this.stopping) return;
-      if (!work) {
+      // #6650: the idle probe sees only lapsed claims; a live-leased claim of a dead owner is looked for here, on its own cadence.
+      if (!work) this.deadOwnersSeen = await this.phase('dead_owner_claims', signal => this.deadOwnerClaims(signal, true));
+      if (!work && !this.deadOwnersSeen?.length) {
         this.nextDelayMs = this.backoff();
         if (!this.maintenanceWorker && Date.now() >= this.nextMaintenance) {
           this.nextMaintenance = Date.now() + 300_000;
@@ -559,15 +566,21 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
           this.report(error);
         }
       }
+      // #6650: a claim whose stamped owner this process can prove dead is reclaimed now, not when its lease
+      // (up to `publicationLeaseMs`) runs out; the statement below takes it with the same guards as an expired one.
+      const deadOwners = this.deadOwnersSeen?.length ? this.deadOwnersSeen : await this.phase('dead_owner_claims', signal => this.deadOwnerClaims(signal));
+      this.deadOwnersSeen = null;
       // #6278: a claim that expired while its owner was preparing (the kill case) counts one preparation attempt.
       await this.phase('expired_claims', signal => this.statements.executeRaw(`WITH expired AS (
         SELECT r.id FROM persistence_requests r WHERE r.state='running' AND r.recovery IS NULL
-        AND r.publication_started=false AND r.claim_expires_at<now() AND ${PERSISTENCE_PROTOCOL_PREDICATE}
+        AND r.publication_started=false AND ${PERSISTENCE_PROTOCOL_PREDICATE}
+        AND (r.claim_expires_at<now() OR r.claim_phase->>'token'=r.execution_token::text
+          AND concat_ws(':',r.claim_phase->'owner'->>'pid',r.claim_phase->'owner'->>'nonce',r.claim_phase->'owner'->>'start')=ANY($3::text[]))
         AND (r.worktree_id IS NULL OR EXISTS (SELECT 1 FROM persistence_worktrees w WHERE w.id=r.worktree_id AND w.owner_host_id=$1::uuid))
         ORDER BY r.sequence LIMIT 100 FOR UPDATE OF r SKIP LOCKED)
         UPDATE persistence_requests r SET state='queued',execution_token=NULL,claim_expires_at=NULL,
           preparation_attempts=r.preparation_attempts+CASE WHEN $2::boolean THEN ${EXPIRED_PREPARING_CHARGE_SQL('r')} ELSE 0 END
-        FROM expired WHERE r.id=expired.id`, [this.hostId, this.policy.deadlines], { signal }));
+        FROM expired WHERE r.id=expired.id`, [this.hostId, this.policy.deadlines, deadOwners], { signal }));
     }
     if (publicationConcurrency(this.engine) === 0) {
       await this.phase('capacity', signal => this.statements.executeRaw(`UPDATE persistence_requests SET blocked_reason='writer_pool_capacity'
@@ -602,6 +615,30 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       } finally { claimed(); }
     }
     await this.claimLanes();
+  }
+  /**
+   * #6650: the owners (`pid:nonce:start`) of unexpired running claims on this host's roots that this process can prove dead
+   * (`claimOwnerProvablyDead`: same boot and pid namespace, pid gone or reused). The reclaim takes a claim only while
+   * its stamp of the current token still names such an owner, so a claim re-taken since this scan (a new token and
+   * stamp) is never touched. Only claims the expired-claim reclaim may take at all qualify: no recovery record and no
+   * publication started, so the dead owner's publication transaction either committed (the row is no longer
+   * `running`) or rolled back with its connection. A live owner, however slow, and an owner on another host or
+   * container keep their full lease. Postgres only, at most every `DEAD_OWNER_SCAN_MS`: PGLite admits one process
+   * and releases abandoned claims at start. An `idle` scan runs where the idle probe does (its reserved lane), so an
+   * idle pool still drains.
+   */
+  private async deadOwnerClaims(signal?: AbortSignal, idle = false): Promise<string[]> {
+    if (this.engine.kind !== 'postgres' || Date.now() - this.deadOwnerScanAt < DEAD_OWNER_SCAN_MS) return [];
+    this.deadOwnerScanAt = Date.now();
+    const lane = idle && !this.laneInUse && consumerConnectionRoute(this.engine).lane !== 'direct' ? await this.acquireIdleLane(signal) : undefined;
+    const owners = await this.probeQuery<{ key: string; owner: string }>(lane, `SELECT DISTINCT
+        concat_ws(':',r.claim_phase->'owner'->>'pid',r.claim_phase->'owner'->>'nonce',r.claim_phase->'owner'->>'start') AS key,(r.claim_phase->'owner')::text AS owner
+      FROM persistence_requests r
+      WHERE r.state='running' AND r.recovery IS NULL AND r.publication_started=false AND r.claim_expires_at>=now()
+        AND r.claim_phase->>'token'=r.execution_token::text AND r.claim_phase->'owner'->>'boot_id' IS NOT NULL
+        AND (r.worktree_id IS NULL OR EXISTS (SELECT 1 FROM persistence_worktrees w WHERE w.id=r.worktree_id AND w.owner_host_id=$1::uuid))
+      LIMIT 100`, [this.hostId], signal);
+    return owners.filter(row => claimOwnerProvablyDead({ owner: JSON.parse(row.owner) })).map(row => row.key);
   }
   /** #5984 lanes: claims the next group heads of every open lane run in this process, up to its effective lane count. */
   private async claimLanes(): Promise<void> {

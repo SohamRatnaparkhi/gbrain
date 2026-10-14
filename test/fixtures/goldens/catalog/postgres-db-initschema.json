@@ -2024,7 +2024,9 @@
           "12 host_json_path text/text NOT NULL",
           "13 persistence_home text/text NOT NULL",
           "14 minted_under jsonb/jsonb NULL",
-          "15 version text/text NOT NULL"
+          "15 version text/text NOT NULL",
+          "16 boot_id text/text NULL",
+          "17 process_start text/text NULL"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },

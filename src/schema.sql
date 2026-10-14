@@ -2071,6 +2071,8 @@ CREATE TABLE IF NOT EXISTS persistence_consumers (
     persistence_home text NOT NULL,
     minted_under jsonb,
     version text NOT NULL,
+    boot_id text,
+    process_start text,
     PRIMARY KEY(host_id,pid,nonce)
   );
 

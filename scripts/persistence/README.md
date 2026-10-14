@@ -537,6 +537,54 @@ The CLI without `--informational` still enforces the threshold. The original
 heavy shell entry invokes this harness; its optional `STRICT_LATENCY=1`
 flag affects only the latency threshold, never validity requirements.
 
+### Managed-sync convergence harness (quarantined)
+
+`test/sync-convergence.serial.test.ts` (#6650) is a real-process profile of
+this gate. It uses the same fault seam (`src/core/persistence/fault-points.ts`,
+preloaded into real `gbrain serve` and `gbrain sync` processes by
+`test/fixtures/convergence-fault-kill.ts`, since production never installs a
+hook) against one isolated Postgres brain behind transaction-mode PgBouncer,
+through an in-test TCP proxy that adds 50 ms of round-trip latency to the
+pooled and the direct URL. It SIGKILLs the resident serve and a sync client at
+seeded publication fault points while a writer rewrites 5% of the pages with
+`gbrain put`, then allows at most three plain `gbrain sync --no-pull` runs
+under a fresh serve (only exit 0 with outcome `synced` counts) and checks the
+oracle: disk == database, no blocking request, every non-committed terminal
+request superseded or carrying a registered code, the cursor at HEAD, and no
+lost fact or timeline row on the large page (timeline duplicates are printed,
+not asserted), the next sync delegating to the live serve whatever heartbeat a
+killed client left, and no sync after an owner kill stalling longer than the
+consumer liveness window plus one renewal and 30 s of slack. Each check is its own test, named by this gate's violation
+class; elapsed times and the longest stall each sync printed are
+`[convergence]` lines.
+
+It skips unless `GBRAIN_TEST_CONVERGENCE=1`, no CI lane sets that, and a run
+takes about 18 minutes at 50 ms (under 2 at 0 ms). Run it against the E2E
+Postgres plus a PgBouncer in front of it:
+
+```bash
+docker network create gbtest
+docker run -d --name gbrain-test-pg --network gbtest -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=gbrain_test -p 5434:5432 pgvector/pgvector:pg16
+docker run -d --name gbrain-test-pgbouncer --network gbtest -e DB_HOST=gbrain-test-pg \
+  -e DB_USER=postgres -e DB_PASSWORD=postgres -e POOL_MODE=transaction -e AUTH_TYPE=plain \
+  -e IGNORE_STARTUP_PARAMETERS=extra_float_digits,statement_timeout,idle_in_transaction_session_timeout,search_path \
+  -p 6543:5432 edoburu/pgbouncer:latest
+GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@localhost:6543/gbrain_test \
+GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@localhost:5434/gbrain_test \
+  bun run test:convergence
+docker rm -f gbrain-test-pgbouncer gbrain-test-pg && docker network rm gbtest
+```
+
+Knobs: `GBRAIN_TEST_CONVERGENCE_SEED` (default 6650) fixes the fault plan and
+the writer's targets, so a failure reproduces; `GBRAIN_TEST_CONVERGENCE_LATENCY_MS`
+(default 50; 0 for a fast local loop); `GBRAIN_TEST_CONVERGENCE_LOG_DIR` keeps
+every client, serve and writer log. `GBRAIN_TEST_CONVERGENCE_PGBOUNCER_CONTAINER=<name>`
+adds a round that runs `docker restart -t 0 <name>` once the drain has
+committed 20 pages. That round restarts the pooler, not the database, and
+cannot place the restart between a COMMIT and its reply, so a database or
+pooler restart with an uncertain commit stays an uncovered case.
+
 ## Engine graduation tests
 
 Graduation (`gbrain migrate --to postgres`) is tested against two fixtures.

@@ -40,7 +40,7 @@
  */
 import type { BrainEngine } from '../engine.ts';
 import { VERSION } from '../../version.ts';
-import { consumerIdentity, sameProcess } from './consumer-heartbeat.ts';
+import { consumerIdentity, consumerProvablyDead, sameProcess } from './consumer-heartbeat.ts';
 
 export type ClaimPhaseName = 'preparing' | 'publishing';
 /** #6405: `publication` is the publish phase's own wait (a stamp in `publishing` no longer reads `unknown`); #6288 `publication_deadline` is a publish past `persistence.publication_ceiling_ms`. */
@@ -75,7 +75,7 @@ export interface ClaimPhaseClock {
  * The process that holds a claim, as the stamp records it. #6317: `nonce` (random per process) and `pid_ns` (the pid
  * namespace where readable) tell a reused pid or another container's pid from this process; an older owner stamps neither.
  */
-export interface ClaimOwner { kind: string; pid: number; version: string; nonce?: string; pid_ns?: string | null }
+export interface ClaimOwner { kind: string; pid: number; version: string; nonce?: string; pid_ns?: string | null; boot_id?: string | null; start?: string | null }
 /** #6317: the step / waiting_on / last_sql triple of a claim, as stamped and as read back. */
 export interface ClaimLastSql { label: string; age_ms: number | null }
 
@@ -137,12 +137,24 @@ export function claimOwnerKind(): string {
 /** The owning process for the stamp: the gbrain command this process runs (`cli` when none is recognisable), its pid, nonce, pid namespace and build. */
 export function claimOwner(): ClaimOwner {
   if (ownerOverride) return ownerOverride;
-  const { pid, nonce, pid_ns } = consumerIdentity();
-  return { kind: claimOwnerKind(), pid, version: VERSION, nonce, pid_ns };
+  const { pid, nonce, pid_ns, boot_id, start } = consumerIdentity();
+  return { kind: claimOwnerKind(), pid, version: VERSION, nonce, pid_ns, boot_id, start };
 }
 /** Whether a stamped owner is this process: the pid and, when the stamp carries one, the nonce (#6317: `owner_pid === process.pid` alone is not enough). */
 export function claimOwnerIsThisProcess(owner: Pick<ClaimOwner, 'pid' | 'nonce'> | null | undefined): boolean {
   return sameProcess(owner);
+}
+/**
+ * #6650: whether the claim stamped `raw` (a `claim_phase` value) was held by a process this one can prove dead
+ * (`consumerProvablyDead`: same boot and pid namespace, its pid gone or reused). A stamp without the markers, from
+ * an older owner, another host or container, is never provably dead.
+ */
+export function claimOwnerProvablyDead(raw: unknown): boolean {
+  const stamp = (typeof raw === 'string' ? safeJson(raw) : raw) as { owner?: Record<string, unknown> } | null;
+  const owner = stamp?.owner;
+  if (!owner || typeof owner.pid !== 'number') return false;
+  const text = (key: string) => typeof owner[key] === 'string' ? owner[key] as string : null;
+  return consumerProvablyDead({ pid: owner.pid, nonce: text('nonce'), pid_ns: text('pid_ns'), boot_id: text('boot_id'), start: text('start') });
 }
 /** Test seam. */
 export function setClaimOwnerForTest(owner: ClaimOwner | undefined): void { ownerOverride = owner; }
