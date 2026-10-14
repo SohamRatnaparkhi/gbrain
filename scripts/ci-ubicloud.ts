@@ -44,7 +44,7 @@
  */
 
 import { spawnSync, type ChildProcess } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
@@ -62,7 +62,7 @@ import {
   type WeightTable,
 } from "./ubicloud/schedule.ts";
 import { runScript, type RunScriptOpts } from "./ubicloud/run-script.ts";
-import { buildTypecheckState, typecheckBuildInfo } from "./ubicloud/typecheck-state.ts";
+import { buildTypecheckState, portableBuildInfo, typecheckBuildInfo } from "./ubicloud/typecheck-state.ts";
 
 const ROOT = resolve(import.meta.dir, "..");
 const RUNNER = join(ROOT, "scripts/ubicloud/ubi-runner.sh");
@@ -403,12 +403,19 @@ async function main() {
     for (const step of control) {
       if (step.lane === "verify" && typecheckState) {
         const { code, ms } = await typecheckState;
-        const sent = existsSync(join(ROOT, buildInfo!))
-          ? await runner(["ssh", vm.name, `mkdir -p ${quote(dirname(`${REMOTE_DIR}/${buildInfo}`))} && cat > ${quote(`${REMOTE_DIR}/${buildInfo}`)}`], { input: join(ROOT, buildInfo!) })
+        const local = `local incremental typecheck (exit ${code}, ${Math.round(ms / 1000)}s)`;
+        const state = join(runDir, "typecheck.tsbuildinfo");
+        let portable: ReturnType<typeof portableBuildInfo> = null;
+        try { portable = portableBuildInfo(ROOT, buildInfo!, state); } catch { /* absent or unreadable: reported below */ }
+        const sent = portable && portable.outside === 0
+          ? await runner(["ssh", vm.name, `mkdir -p ${quote(dirname(`${REMOTE_DIR}/${buildInfo}`))} && cat > ${quote(`${REMOTE_DIR}/${buildInfo}`)}`], { input: state })
           : null;
+        const rerooted = portable?.moved ? `, ${portable.moved} entries re-rooted from the symlinked node_modules` : "";
         log(sent?.code === 0
-          ? `typecheck state: local incremental typecheck (exit ${code}, ${Math.round(ms / 1000)}s) uploaded to ${vm.name}; verify's typecheck runs warm`
-          : `typecheck state: ${sent ? `upload to ${vm.name} failed (exit ${sent.code})` : `no ${buildInfo} after the local typecheck (exit ${code})`}; verify's typecheck runs cold`);
+          ? `typecheck state: ${local} uploaded to ${vm.name}${rerooted}; verify's typecheck runs warm`
+          : `typecheck state: ${!portable ? `no readable ${buildInfo} after the ${local}`
+            : portable.outside ? `${portable.outside} entries of the ${local} resolve outside the checkout, not uploaded`
+            : `upload to ${vm.name} failed (exit ${sent!.code})`}; verify's typecheck runs cold`);
       }
       log(`control on ${vm.name}: ${step.lane}${step.files.length ? ` (${step.files.length} exclusive files, sequential)` : ""}`);
       const { parsed, logPath } = await runBatch(vm, 1, step.lane, step.files);

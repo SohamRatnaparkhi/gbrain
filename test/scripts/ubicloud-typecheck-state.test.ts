@@ -4,10 +4,10 @@
  * verify's typecheck on the VM runs incrementally instead of cold.
  */
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { buildTypecheckState, typecheckBuildInfo } from '../../scripts/ubicloud/typecheck-state.ts';
+import { buildTypecheckState, portableBuildInfo, typecheckBuildInfo } from '../../scripts/ubicloud/typecheck-state.ts';
 
 const ROOT = resolve(import.meta.dir, '..', '..');
 const dirs: string[] = [];
@@ -36,4 +36,32 @@ test('building the state runs the typecheck script and reports its exit code, ev
   expect(spawned).toHaveLength(1);
   expect(readFileSync(join(dir, 'out.txt'), 'utf8')).toBe('checked\n');
   expect(existsSync(join(dir, 'log.txt'))).toBe(true);
+});
+
+test('entries reached through a symlinked node_modules are re-rooted under the checkout, so they resolve on the VM', () => {
+  const top = mkdtempSync(join(tmpdir(), 'gbrain-typecheck-portable-'));
+  dirs.push(top);
+  const shared = join(top, 'main', 'node_modules'), root = join(top, 'work', 'gate');
+  mkdirSync(join(shared, '.cache'), { recursive: true });
+  mkdirSync(root, { recursive: true });
+  symlinkSync(shared, join(root, 'node_modules'));
+  const climb = '../'.repeat(join(root, 'node_modules', '.cache').split('/').length - 1);
+  // What tsc 5.9 wrote from such a worktree (#6673): sources relative to the buildinfo, node_modules files through their real path.
+  writeFileSync(join(shared, '.cache', 'tc.tsbuildinfo'), JSON.stringify({
+    fileNames: [`${climb}${shared.slice(1)}/typescript/lib/lib.es5.d.ts`, `${climb}${shared.slice(1)}/@types/bun/node_modules/bun-types/globals.d.ts`, '../../src/core/engine.ts', `${climb}${top.slice(1)}/elsewhere/x.ts`],
+    fileInfos: [], version: '5.9.3',
+  }));
+  const out = join(top, 'portable.tsbuildinfo');
+  expect(portableBuildInfo(root, 'node_modules/.cache/tc.tsbuildinfo', out)).toEqual({ moved: 2, outside: 1 });
+  const written = JSON.parse(readFileSync(out, 'utf8')) as { fileNames: string[]; version: string };
+  expect(written.fileNames.slice(0, 3)).toEqual(['../typescript/lib/lib.es5.d.ts', '../@types/bun/node_modules/bun-types/globals.d.ts', '../../src/core/engine.ts']);
+  expect(written.version).toBe('5.9.3');
+
+  const plain = join(top, 'plain');
+  mkdirSync(join(plain, 'node_modules', '.cache'), { recursive: true });
+  writeFileSync(join(plain, 'node_modules', '.cache', 'tc.tsbuildinfo'), JSON.stringify({ fileNames: ['../typescript/lib/lib.es5.d.ts', '../../src/a.ts'] }));
+  expect(portableBuildInfo(plain, 'node_modules/.cache/tc.tsbuildinfo', out)).toEqual({ moved: 0, outside: 0 });
+  expect((JSON.parse(readFileSync(out, 'utf8')) as { fileNames: string[] }).fileNames).toEqual(['../typescript/lib/lib.es5.d.ts', '../../src/a.ts']);
+  writeFileSync(join(plain, 'node_modules', '.cache', 'tc.tsbuildinfo'), '{}');
+  expect(portableBuildInfo(plain, 'node_modules/.cache/tc.tsbuildinfo', out)).toBeNull();
 });

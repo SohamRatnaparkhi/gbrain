@@ -12,44 +12,45 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.226.0] - 2026-10-14
 
-**Choose HydraDB for durable cloud memory, and keep local memory as your fallback.**
+**The Ubicloud gate's `verify` typecheck runs warm from a worktree whose `node_modules` is a symlink.** Verify's typecheck on #6673's gate timed out at 121 s against its 120 s cap; the rerun passed at 113 s. That gate ran from a `git worktree` whose `node_modules` is a symlink to the main checkout's, a common way to skip a `bun install` per worktree. tsc records each source file relative to the buildinfo's directory, but it records the files it reaches through node_modules by their real path: the TypeScript lib files and bun-types' globals, 990 entries in all. In that layout, those entries point out of the checkout (`../../../../../../../../workspace/gbrain/node_modules/typescript/lib/lib.es5.d.ts`). On the VM they resolve to nothing, the global declarations count as changed, and tsc rechecks every file. All four of that worktree's gates logged `verify's typecheck runs warm`, but the typecheck took 84, 85, 113 and 121 s, the same as a cold one. The 120 s cap is unchanged.
 
-You can now connect your brain to HydraDB with `gbrain cloud connect`. Fast retrieval is the default; `gbrain cloud mode thinking` selects thinking mode. Agents receive Markdown context using HydraDB’s SDK formatter, with permitted graph and dated evidence. Natural-language queries,
-search and recall use the cloud even when your brain has no embedding-provider key.
-Pages remain available locally, and turning cloud memory off restores local search.
-Existing gstack context queries use the selected backend.
-
-### How to turn it on
-
-Run `gbrain cloud connect` and review what will be shared. Get an API key from the
-HydraDB dashboard, then follow the prompt. For gstack context loading, set
-`GSTACK_BRAIN_TIMEOUT_MS=10000` in your agent's environment.
-
-| Your choice | What happens |
-| --- | --- |
-| Cloud primary on | HydraDB retrieves and ranks natural-language page searches. |
-| Cloud primary off | Local search resumes; pages still sync to HydraDB. |
-| Disconnect | Cloud sync stops; local memory keeps working. |
-
-Private pages and private fact rows stay local. Detected secrets are redacted from
-outgoing text and titles. Structured record reads, explicit keyword enumeration,
-image similarity and symbol walks keep their existing local contracts.
+**The Zig compiler setup in the `native-locks` jobs fails with a named error instead of running into the job timeout.** On .223's master Test run, the `darwin-x64 / Bun 1.4.3` cell sat in `setup-toolchain.ts` from 15:57:37 until the 15-minute job timeout (job 115955272565; the log has expired). Its cache step restored the pinned archive (`zig-archive-macOS-X64`, cached since 2026-09-30, the same key the Bun 1.4.0 sibling restored that minute), so no download ran. The step was stuck in `tar -xf` or `zig version`, neither of which had a timeout. The download path had its own gap: a mirror trickling just above the 30 s stall rule could hold each of six sources for 240 s, 24 minutes in all. Every phase is now bounded and prints its duration, so the next hang names its phase.
 
 ### Itemized changes
 
-- Add opt-in cloud connection, status, indexed backfill, write-through syncing and disconnect commands.
-- Route keyless recall and both hybrid search entry points through the selected cloud backend.
-- Preserve source, type, date, slug and pagination filters without running local relevance ranking.
-- Verify per-item ingestion, indexing and deletion outcomes before advancing mirror cursors.
-- Keep page identities distinct across sources and retry interrupted batches.
-- Reconcile archived/restored sources, expand schema type aliases in cloud searches, serialize PostgreSQL uploads across processes, and preserve shared credentials when one brain disconnects.
-- Add an optional staging endpoint and a synthetic live smoke, including gstack CLI context loading.
+- **`scripts/ubicloud/typecheck-state.ts` `portableBuildInfo`** writes the uploaded copy (`<run>/typecheck.tsbuildinfo`). It moves every entry under the real path of the checkout's `node_modules` back under the checkout's own `node_modules` path, which the VM's frozen install lays out the same way. A checkout with a real `node_modules` is copied unchanged. Only the `fileNames` table carries paths; everything else in tsc 5.9's buildinfo refers to files by index. tsc still checks every file's content hash, so a wrong mapping costs time, never correctness.
+- **`scripts/ci-ubicloud.ts`** uploads that copy. When it re-roots entries, the log line says how many. If an entry still resolves outside the checkout, the state is not uploaded, and the log says verify's typecheck runs cold and why, instead of claiming it runs warm.
+- **Proof.** Forced probe on a 16-vCPU gate VM, typecheck alone:
+  - The buildinfo written from a symlinked worktree took 84 s and 91 s.
+  - The same file re-rooted took 16 s and 15 s.
+  - The gate's own verify step, run from that worktree. Before: the log said `runs warm` and verify's typecheck took 90 s. After: the log said `990 entries re-rooted from the symlinked node_modules; verify's typecheck runs warm`, and the typecheck took 16 s.
+- **`test/scripts/ubicloud-typecheck-state.test.ts`** builds a worktree with a symlinked `node_modules` and the entries tsc 5.9 wrote there. It checks that lib and bun-types entries are re-rooted, sources are kept, a path outside both is counted, a plain checkout is unchanged, and a file without `fileNames` is refused.
+- **`scripts/native/setup-toolchain.ts`:**
+  - The download has one 300 s budget across all sources.
+  - A source is dropped when its rate over the last 15 s projects that the pinned size can't arrive before the budget ends, or when no bytes arrive for 30 s.
+  - A failure lists every source with its reason: `too slow: 100 KB/s leaves 45 MB for 285.0s of the download budget`, or `not tried` once the budget is spent.
+  - `tar -xf` runs under 90 s and `zig version` under 60 s, killed with SIGKILL on overrun with `<phase> did not finish within <n>s`.
+  - The script prints the download, extraction and version-check times.
+  - `GBRAIN_ZIG_SOURCES` and `GBRAIN_ZIG_DOWNLOAD_BUDGET_S` point it at a local mirror (and the tests).
+- **Shard weights refreshed** (`scripts/{test,serial,e2e}-weights.json` and their `.metadata.json`) from Test run 38587567819 (unit, serial) and the full E2E run 38521702276. Unweighted share, before → after, counted the way `check:weight-coverage` counts:
 
-### To take advantage of v0.60.226.0
+  | Lane | Before | After |
+  | --- | --- | --- |
+  | unit | 24 of 3322 (0.7%) | 10 of 3322 (0.3%) |
+  | serial | 2 of 404 (0.5%) | 1 of 404 (0.2%) |
+  | e2e | 9 of 579 (1.6%) | 5 of 579 (0.9%) |
 
-Upgrade GBrain, then run `gbrain cloud connect` if you want HydraDB memory.
-Cloud memory remains off until you explicitly connect. See
-[cloud memory](docs/guides/cloud-memory.md) for setup and off switches.
+  `check:weight-coverage` reports no dead entries.
+- **`native-locks.yml`:** both Zig setup steps are named and carry `timeout-minutes: 9`, which covers the script's 450 s worst case. The job timeout stays at 15 minutes.
+- **Forced probe (a loopback mirror serving the real 49 MB pinned archive, throttled):**
+  - Two sources at 100 KB/s, old script: 240 s on each, failed after 480 s.
+  - New script: each source dropped as too slow after 15 s, failed with the named error after 31 s.
+  - A 100 KB/s source, then a 400 KB/s source: the first was dropped; the second was kept (it fits the budget) and finished in 120 s; extraction took 2.9 s.
+- **`test/scripts/native-setup-toolchain.test.ts`** runs the real script against loopback mirrors:
+  - trickling sources are dropped by rate and fail named inside a 10 s budget;
+  - silent sources are dropped, and those past the budget are reported as not tried;
+  - `runWithin` kills and names an overrun;
+  - every Zig setup step's timeout covers the script's bounds and fits inside its job.
 
 ## [0.60.225.0] - 2026-10-14
 

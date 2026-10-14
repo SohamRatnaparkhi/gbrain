@@ -87,7 +87,12 @@ jobs:
             ${{ runner.temp }}/gbrain-zig/zig-*.zip
             ${{ runner.temp }}/gbrain-zig/zig-*.tar.xz
           key: zig-archive-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/native/toolchain.json') }}
-      - run: bun scripts/native/setup-toolchain.ts --dir "${{ runner.temp }}/gbrain-zig" --github-path
+      # Bounded inside: a 300 s download budget across every source with a
+      # minimum-rate rule, 90 s to extract, 60 s for `zig version` (.223's
+      # darwin-x64 cell sat here until the 15-minute job timeout).
+      - name: Set up the pinned Zig compiler (bounded)
+        timeout-minutes: 9
+        run: bun scripts/native/setup-toolchain.ts --dir "${{ runner.temp }}/gbrain-zig" --github-path
       - run: bun scripts/native/build.ts --target ${{ matrix.target }} --output "${{ runner.temp }}/native-rebuilt"
       - run: bun scripts/native/verify.ts --rebuilt "${{ runner.temp }}/native-rebuilt"
       - name: Verify Darwin ABI against the native SDK
@@ -208,7 +213,12 @@ jobs:
             ${{ runner.temp }}/gbrain-zig/zig-*.zip
             ${{ runner.temp }}/gbrain-zig/zig-*.tar.xz
           key: zig-archive-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/native/toolchain.json') }}
-      - run: bun scripts/native/setup-toolchain.ts --dir "${{ runner.temp }}/gbrain-zig" --github-path
+      # Bounded inside: a 300 s download budget across every source with a
+      # minimum-rate rule, 90 s to extract, 60 s for `zig version` (.223's
+      # darwin-x64 cell sat here until the 15-minute job timeout).
+      - name: Set up the pinned Zig compiler (bounded)
+        timeout-minutes: 9
+        run: bun scripts/native/setup-toolchain.ts --dir "${{ runner.temp }}/gbrain-zig" --github-path
       - run: bun scripts/native/build.ts --target ${{ matrix.target }} --output "${{ runner.temp }}/native-rebuilt"
       - run: bun scripts/native/verify.ts --rebuilt "${{ runner.temp }}/native-rebuilt"
       - name: Execute prebuild in native musl userspace
