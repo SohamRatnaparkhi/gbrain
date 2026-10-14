@@ -28,7 +28,7 @@ import { readStdinPayload } from '../core/stdin-read.ts';
 import {
   DEFAULT_HYDRADB_DATABASE, HYDRADB_API_KEY_ENV, HYDRADB_CONFIG, HydraDBError,
   apiKeyPrefix, hydraRequest, resolveHydraConnection, saveHydraApiKey, type HydraConnection,
-  HYDRADB_BASE_URL, HYDRADB_BASE_URL_ENV, hydraBaseUrl,
+  HYDRADB_BASE_URL, HYDRADB_BASE_URL_ENV, hydraBaseUrl, hydraQueryMode,
 } from '../core/hydradb.ts';
 import { mirrorBrain } from '../core/hydradb-mirror.ts';
 
@@ -47,10 +47,12 @@ function printHelp(): void {
     '  connect               Show what is shared, ask, store the API key, mirror the brain.',
     '                          --database <name>  HydraDB database (default: gbrain)',
     '                          --api-url <url>    HydraDB endpoint (default: production)',
+    '                          --mode fast|thinking  Retrieval mode (default: fast)',
     `                          --key -            read the API key from stdin (else ${HYDRADB_API_KEY_ENV} or a prompt)`,
     '                          --no-push          connect without the first mirror',
     '  status [--json]       Connection, recall and mirror state (never prints the key).',
     '  push [--full]         Mirror changes now (--full re-sends every page).',
+    '  mode fast|thinking     Set cloud retrieval mode (default: fast). Thinking may take longer.',
     '  primary on|off        Search through HydraDB (on) or this brain alone (off; pages keep syncing).',
     '  disconnect            Stop using the cloud. --purge-cloud also deletes the HydraDB database.',
     '',
@@ -116,6 +118,9 @@ async function push(engine: BrainEngine, conn: HydraConnection, full: boolean): 
 }
 
 async function connect(engine: BrainEngine, args: string[]): Promise<void> {
+  const modeFlag = args.find(a => a === '--mode' || a.startsWith('--mode='));
+  const mode = modeFlag?.includes('=') ? modeFlag.slice(7) : modeFlag ? args[args.indexOf(modeFlag) + 1] : 'fast';
+  if (mode !== 'fast' && mode !== 'thinking') { console.error('Use --mode fast|thinking'); setCliExitVerdict(1); return; }
   const dbFlag = args.indexOf('--database');
   const database = (dbFlag >= 0 ? args[dbFlag + 1] : undefined) ?? DEFAULT_HYDRADB_DATABASE;
   const urlFlag = args.indexOf('--api-url');
@@ -159,6 +164,7 @@ async function connect(engine: BrainEngine, args: string[]): Promise<void> {
   await engine.setConfig(HYDRADB_CONFIG.database, database);
   await engine.setConfig(HYDRADB_CONFIG.baseUrl, baseUrl);
   await engine.setConfig(HYDRADB_CONFIG.primary, 'true');
+  await engine.setConfig(HYDRADB_CONFIG.mode, mode);
   console.log(`✓ Connected to HydraDB database "${database}" (key ${apiKeyPrefix(apiKey.key)}…).`);
   if (!ready) {
     console.log('HydraDB is still provisioning the database; the next autopilot cycle (or `gbrain cloud push`) mirrors the brain.');
@@ -177,6 +183,7 @@ async function status(engine: BrainEngine, args: string[]): Promise<void> {
     api_url: await engine.getConfig(HYDRADB_CONFIG.baseUrl) ?? HYDRADB_BASE_URL,
     key: conn ? `${apiKeyPrefix(conn.apiKey)}…` : null,
     key_source: conn ? (process.env[HYDRADB_API_KEY_ENV] ? 'env' : 'vault') : null,
+    mode: hydraQueryMode(await engine.getConfig(HYDRADB_CONFIG.mode)),
     primary: isConfigTruthy(await engine.getConfig(HYDRADB_CONFIG.primary)),
     last_push_at: await engine.getConfig(HYDRADB_CONFIG.lastPushAt),
     mirrored_through: cursor ? (JSON.parse(cursor) as { updatedAt: string }).updatedAt : null,
@@ -189,6 +196,7 @@ async function status(engine: BrainEngine, args: string[]): Promise<void> {
     console.log('Cloud memory is off. Turn it on: gbrain cloud connect');
     return;
   }
+  console.log(`HydraDB mode: ${row.mode}`);
   console.log(`HydraDB database "${row.database}"  key: ${row.key ?? `missing (set ${HYDRADB_API_KEY_ENV} or re-run gbrain cloud connect)`}  search: ${row.primary ? 'HydraDB' : 'local'}`);
   console.log(`  last push: ${row.last_push_at ?? 'never'}  mirrored through: ${row.mirrored_through ?? 'nothing yet'}`);
 }
@@ -237,6 +245,14 @@ export async function runCloud(engine: BrainEngine, args: string[]): Promise<voi
     case 'push': {
       const conn = await requireConnection(engine);
       if (conn) await push(engine, conn, rest.includes('--full'));
+      return;
+    }
+    case 'mode': {
+      const mode = rest[0];
+      if (mode !== 'fast' && mode !== 'thinking') { console.error('Usage: gbrain cloud mode fast|thinking'); setCliExitVerdict(1); return; }
+      if (!await requireConnection(engine)) return;
+      await engine.setConfig(HYDRADB_CONFIG.mode, mode);
+      console.log(`HydraDB search mode: ${mode}.`);
       return;
     }
     case 'primary': {

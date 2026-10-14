@@ -3,11 +3,11 @@ import { hydraRequest, type HydraConnection } from './hydradb.ts';
 
 interface Item { id: string; status?: string; error?: string | null }
 interface IngestReceipt { failed_count?: number; results?: Item[] }
-const INDEX_TIMEOUT_MS = 120_000;
+const INDEX_TIMEOUT_MS = 600_000;
 
 export async function ingestHydra(conn: HydraConnection, form: FormData, ids: string[], signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();
-  const receipt = await hydraRequest<IngestReceipt>(conn, 'POST', '/context/ingest', { form, signal });
+  const receipt = await hydraRequest<IngestReceipt>(conn, 'POST', '/context/ingest', { form, signal, timeoutMs: 120_000 });
   if (!receipt?.results || receipt.failed_count || ids.some(id => !receipt.results!.some(r => r.id === id && !r.error && ['queued', 'processing', 'completed'].includes(r.status ?? '')))) {
     throw new Error('HydraDB did not accept every page; the mirror will retry this batch.');
   }

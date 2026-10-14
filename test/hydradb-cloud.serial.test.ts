@@ -14,6 +14,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { handleToolCall } from '../src/mcp/server.ts';
+import { unpackToolResult } from '../src/core/mcp-client.ts';
 import { dispatchToolCall } from '../src/mcp/dispatch.ts';
 import { HYDRADB_API_KEY_ENV, HYDRADB_CONFIG, hydraDocId, resolveHydraConnection, saveHydraApiKey } from '../src/core/hydradb.ts';
 import { hydraPrimarySearch } from '../src/core/search/hydra-primary.ts';
@@ -28,13 +29,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withEnv } from './helpers/with-env.ts';
 
-interface CloudDoc { id: string; title: string; markdown: string; meta: { gbrain_source: string; gbrain_slug: string; gbrain_type?: string } }
+interface CloudDoc { id: string; title: string; markdown: string; meta: { gbrain_source: string; gbrain_slug: string; gbrain_type?: string; gbrain_revision?: string } }
 const cloud = {
   database: null as string | null,
   docs: new Map<string, CloudDoc>(),
   calls: [] as string[],
   queries: [] as Array<Record<string, unknown>>,
   fail: false,
+  responseExtras: {} as Record<string, unknown>,
 };
 const realFetch = globalThis.fetch;
 const reply = (data: unknown, status = 200) => new Response(JSON.stringify({ success: status < 300, data }), { status, headers: { 'content-type': 'application/json' } });
@@ -73,14 +75,16 @@ async function fakeHydra(input: string | URL | Request, init?: RequestInit): Pro
       for (const id of ids) cloud.docs.delete(id);
       return reply({ deleted_count: ids.length, results: ids.map(id => ({ id, deleted: true })) });
     }
+    case 'POST /context/list':
+      return reply({ sources: (json().ids as string[]).flatMap(id => { const d = cloud.docs.get(id); return d ? [{ id, title: d.title, additional_metadata: d.meta }] : []; }) });
     case 'POST /query': {
       const body = json();
       cloud.queries.push(body);
       const allowed: string[] | undefined = body.metadata_filters?.additional_metadata?.gbrain_source;
       const types: string[] | undefined = body.metadata_filters?.additional_metadata?.gbrain_type;
       const chunks = [...cloud.docs.values()].filter(d => (!allowed || allowed.includes(d.meta.gbrain_source)) && (!types || types.includes(d.meta.gbrain_type ?? '')))
-        .map(d => ({ id: d.id, source_title: d.title, chunk_content: d.markdown, additional_metadata: d.meta }));
-      return reply({ chunks });
+        .map(d => ({ id: d.id, chunk_uuid: d.id + '_chunk_0000', source_title: d.title, chunk_content: d.markdown, additional_metadata: d.meta }));
+      return reply({ chunks, ...cloud.responseExtras });
     }
     default:
       return reply(null, 404);
@@ -144,7 +148,7 @@ beforeEach(async () => {
   cloud.docs.clear();
   cloud.calls = [];
   cloud.queries = [];
-  cloud.fail = false;
+  cloud.fail = false; cloud.responseExtras = {};
   await disconnectAll();
   _resetCliExitVerdictForTests();
 });
@@ -219,7 +223,8 @@ describe('HydraDB as primary search', () => {
     const on = await query();
     expect(pages(on)).toEqual([['page', 'notes/garden', sourceId], ['cloud', null, sourceId], ['page', 'notes/forge-offsite', sourceId]]);
     expect(on.find(r => r.slug === 'notes/garden')!.page_id).toBeGreaterThan(0);
-    expect(on.find(r => r.result_type === 'cloud')!.chunk_text).toBe('The Forge offsite moved to Missoula.');
+    expect(on.find(r => r.result_type === 'cloud')!.chunk_text).toContain('The Forge offsite moved to Missoula.');
+    expect(on.find(r => r.result_type === 'cloud')!.chunk_text).toContain('Source:');
     expect(cloud.queries.at(-1)!.metadata_filters).toEqual({ additional_metadata: { gbrain_source: [sourceId] } });
   });
 
@@ -269,6 +274,7 @@ describe('gbrain cloud', () => {
     expect(cloud.database).toBe('gbrain');
     expect(cloud.docs.has(hydraDocId(sourceId, 'notes/forge-offsite'))).toBe(true);
     expect(await engine.getConfig(HYDRADB_CONFIG.primary)).toBe('true');
+    expect(await engine.getConfig(HYDRADB_CONFIG.mode)).toBe('fast');
 
     await quiet(() => runCloud(engine, ['primary', 'off']));
     expect(await engine.getConfig(HYDRADB_CONFIG.primary)).toBe('false');
@@ -281,10 +287,11 @@ describe('gbrain cloud', () => {
 
   test('connect reuses an existing database, so a second device joins it', async () => {
     cloud.database = 'gbrain';
-    await quiet(() => runCloud(engine, ['connect', '--yes', '--no-push']));
+    await quiet(() => runCloud(engine, ['connect', '--yes', '--no-push', '--mode=thinking']));
     expect(currentExitCode()).toBe(0);
     expect(await engine.getConfig(HYDRADB_CONFIG.database)).toBe('gbrain');
     expect(cloud.calls).not.toContain('POST /context/ingest');
+    expect(await engine.getConfig(HYDRADB_CONFIG.mode)).toBe('thinking');
   });
 
   test('a vault key is used when the environment has none', async () => {
@@ -366,3 +373,104 @@ test('disconnecting one brain preserves a shared vault key for another brain', a
     });
   } finally { await other.disconnect(); rmSync(home, { recursive: true, force: true }); }
 }, 120_000);
+
+
+test('fast-mode Markdown reaches agents, while JSON remains available to thin clients', async () => {
+  await connectAll(); await mirrorBrain(engine, conn, { full: true });
+  const id = hydraDocId(sourceId, 'notes/forge-offsite');
+  const doc = cloud.docs.get(id)!; cloud.docs.clear(); cloud.docs.set(id, doc);
+  const markdown = '# HydraDB answer context\n\nThe offsite is in Santa Fe. Its owner is team-example.\n\n## Sources\n\n[1] Forge offsite';
+  cloud.responseExtras = { llm_prompt: markdown };
+  const options = { remote: true, transport: 'stdio' as const, sourceId,
+    auth: { token: 't', clientId: 'markdown-probe', scopes: ['read'], sourceId, allowedSources: [sourceId] },
+    config: { engine: engine.kind } as never, logger: { info() {}, warn() {}, error() {} } };
+  const result = await dispatchToolCall(engine, 'query', { query: Q, expand: false, limit: 8 }, options);
+  expect(result.isError).not.toBe(true);
+  expect(result.content[0]!.text).toBe(markdown);
+  expect(unpackToolResult<SearchResult[]>(result)).toHaveLength(1);
+  const { captureRetrievalMeta, formatResult } = await import('../src/cli/main.ts');
+  captureRetrievalMeta('retrieval', result._meta!.retrieval);
+  expect(formatResult('query', unpackToolResult(result))).toBe(markdown + '\n');
+  expect(JSON.parse(formatResult('query', unpackToolResult(result), { json: true }))).toHaveLength(1);
+  expect(cloud.queries.at(-1)).toMatchObject({ mode: 'fast', query_by: 'hybrid', graph_context: true });
+  const http = await dispatchToolCall(engine, 'query', { query: Q, expand: false, limit: 8 }, { ...options, transport: 'http' });
+  expect(JSON.parse(http.content[0]!.text)).toHaveLength(1);
+  expect(http.content.some(c => c.text === markdown)).toBe(true);
+  for (const op of ['search', 'recall']) {
+    const delivered = await dispatchToolCall(engine, op, { query: Q, limit: 8 }, options);
+    expect(delivered.isError).not.toBe(true);
+    expect(delivered.content[0]!.text).toContain(markdown);
+    expect(delivered.structuredContent).toBeDefined();
+    if (op === 'recall') {
+      captureRetrievalMeta('hydradb', delivered._meta!.hydradb);
+      expect(formatResult('recall', unpackToolResult(delivered))).toContain(markdown);
+    }
+  }
+});
+
+test('SDK formatting retains authorized graph and temporal context and rejects foreign evidence', async () => {
+  await connectAll(); await mirrorBrain(engine, conn, { full: true });
+  const id = hydraDocId(sourceId, 'notes/forge-offsite'), chunk = id + '_chunk_0000';
+  const doc = cloud.docs.get(id)!; cloud.docs.clear(); cloud.docs.set(id, doc);
+  const triplet = { source: { name: 'Offsite' }, relation: { canonical_predicate: 'owned_by', temporal_details: '2026-01-01', context: 'Verified owner.' }, target: { name: 'team-example' } };
+  cloud.responseExtras = { llm_prompt: 'FOREIGN_CANONICAL_MUST_NOT_LEAK', graph_context: {
+    query_paths: [{ source_chunk_ids: [chunk], triplets: [triplet], combined_context: 'Authorized graph synthesis.' },
+      { source_chunk_ids: [chunk, 'foreign-chunk'], triplets: [], combined_context: 'FOREIGN_GRAPH_MUST_NOT_LEAK' }],
+    chunk_relations: [], chunk_id_to_group_ids: {} }, temporal_filter: { applied: true },
+    temporal_facts: [{ chunk_id: chunk, source_id: id, subject: 'Offsite', relation: 'scheduled_for', object: 'Thursday', event_start: 1767225600 },
+      { chunk_id: 'foreign-chunk', subject: 'FOREIGN_TEMPORAL_MUST_NOT_LEAK' }] };
+  const rows = await query();
+  const text = JSON.stringify(rows);
+  expect(text).toContain('Authorized graph synthesis.');
+  expect(text).toContain('team-example');
+  expect(text).toContain('Dated Facts');
+  expect(text).toContain('2026-01-01');
+  expect(text).not.toContain('FOREIGN_');
+  const oldRevision = doc.meta.gbrain_revision;
+  await putPage(engine, sourceId, 'notes/forge-offsite', page('note', 'Forge offsite', 'Updated public offsite plan.'), (await engine.getPage('notes/forge-offsite', { sourceId }))!.knowledge_revision);
+  expect((await engine.getPage('notes/forge-offsite', { sourceId }))!.knowledge_revision).not.toBe(oldRevision);
+  const stale = JSON.stringify(await query());
+  expect(stale).toContain('Updated public offsite plan.');
+  expect(stale).not.toContain('Authorized graph synthesis.');
+  expect(stale).not.toContain('team-example');
+});
+
+
+test('users can configure thinking and switch back to the default fast mode', async () => {
+  await connectAll(); cloudDoc(sourceId, 'notes/mode-probe', 'A mode selection probe.');
+  await runCloud(engine, ['mode', 'thinking']);
+  expect(currentExitCode()).toBe(0);
+  expect(await engine.getConfig(HYDRADB_CONFIG.mode)).toBe('thinking');
+  await query(); expect(cloud.queries.at(-1)!.mode).toBe('thinking');
+  await runCloud(engine, ['mode', 'fast']);
+  await query(); expect(cloud.queries.at(-1)!.mode).toBe('fast');
+  const count = cloud.queries.length;
+  await runCloud(engine, ['mode', 'turbo']);
+  expect(currentExitCode()).toBe(1);
+  expect(await engine.getConfig(HYDRADB_CONFIG.mode)).toBe('fast');
+  expect(cloud.queries).toHaveLength(count);
+});
+
+test('invalid setup mode fails before connecting or sending memory', async () => {
+  await runCloud(engine, ['connect', '--yes', '--mode', 'turbo']);
+  expect(currentExitCode()).toBe(1);
+  expect(cloud.calls).toEqual([]);
+  expect(await engine.getConfig(HYDRADB_CONFIG.database)).toBeNull();
+});
+
+test('unified graph supporting contexts resolve source metadata before admission', async () => {
+  await connectAll(); await mirrorBrain(engine, conn, { full: true });
+  const id = hydraDocId(sourceId, 'notes/forge-offsite');
+  const doc = cloud.docs.get(id)!; cloud.docs.clear(); cloud.docs.set(id, doc);
+  cloudDoc(sourceId, 'notes/support', 'The owner is team-example.');
+  const supportId = hydraDocId(sourceId, 'notes/support');
+  cloud.responseExtras = { chunks: [{ context_id: id, chunk_id: 'primary-chunk', content: doc.markdown }],
+    forceful_relations: [{ chunk: { context_id: supportId, chunk_id: 'support-chunk', content: 'The owner is team-example.' } }],
+    graph: [{ path_summary: 'Unified authorized synthesis.', triplets: [
+      { source: { name: 'Offsite' }, target: { name: 'Thursday' }, relation: { chunk_id: 'primary-chunk', predicate: 'scheduled_for' } },
+      { source: { name: 'Offsite' }, target: { name: 'team-example' }, relation: { chunk_id: 'support-chunk', predicate: 'owned_by' } }] }] };
+  const rows = await query();
+  expect(cloud.calls).toContain('POST /context/list');
+  expect(JSON.stringify(rows)).toContain('Unified authorized synthesis.');
+  expect(JSON.stringify(rows)).toContain('The owner is team-example.');
+});

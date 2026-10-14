@@ -2122,6 +2122,7 @@ export function affectsRecall(d: { stage?: string; reason?: string } | undefined
 export interface HybridSearchMeta {
   /** HydraDB owns retrieval and ranking when this brain opted into cloud primary. */
   backend?: 'hydradb';
+  hydradb_mode?: 'fast' | 'thinking';
   /** True iff vector search actually ran. False when OPENAI_API_KEY missing or embed failed. */
   vector_enabled: boolean;
   /** System One: slot diagnostics (only when a slot ran visibly) and the reranker model version that answered. */

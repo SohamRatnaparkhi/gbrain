@@ -63,7 +63,7 @@ entry remains available to other connected brains.
 ## How search uses it
 
 While HydraDB is primary, `query`, `search` and `recall` take their ranking from
-HydraDB (2.5 s budget, scoped to the caller's sources). Each hit resolves to this
+HydraDB (2.5 s in fast mode, 15 s in thinking mode, scoped to the caller's sources). Each hit resolves to this
 brain's own page row under the caller's full read policy, so trust labels,
 `get_page` and evidence delivery work as before:
 
@@ -88,6 +88,26 @@ local contracts. They are not natural-language cloud searches.
 
 While HydraDB is primary, private pages are not searchable (they are never sent),
 and a page written seconds ago may not be found yet.
+
+## Retrieval mode and Markdown
+
+Fast mode is the default. Choose a mode during setup or change it later; the
+preference is saved for this brain and used by `query`, `search` and `recall`:
+
+```bash
+gbrain cloud connect --mode thinking
+gbrain cloud mode thinking
+gbrain cloud mode fast
+gbrain cloud status --json                # includes the saved mode
+```
+
+HydraDB's response includes Markdown and structured evidence. GBrain uses the
+server's Markdown when all evidence survives the caller's access rules and
+output limits. When results are filtered, stale or budgeted, it rebuilds the
+allowed context using HydraDB's SDK `buildString`, retaining authorized graph
+and dated evidence. CLI text and stdio MCP return readable Markdown. JSON CLI
+output and MCP structured results remain available; HTTP MCP also includes a
+Markdown content block while preserving the existing JSON block for clients.
 
 ## Off switches
 
@@ -115,6 +135,13 @@ gbrain cloud connect
 
 **Say to your agent:** *"Connect my gstack memory to HydraDB and allow ten seconds
 for context loading."* Automatic transcript capture remains a separate opt-in.
+
+For thinking mode, allow more time for retrieval:
+
+```bash
+gbrain cloud mode thinking
+export GSTACK_BRAIN_TIMEOUT_MS=30000
+```
 
 ## Staging and live verification
 

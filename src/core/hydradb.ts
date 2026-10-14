@@ -11,6 +11,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { hydraHits, hydraRelatedChunks, type HydraEvidence, type HydraResponse } from './hydradb-response.ts';
 import type { BrainEngine } from './engine.ts';
 import { credentialId, openVault } from './creds/vault.ts';
 
@@ -26,6 +27,7 @@ export const HYDRADB_CONFIG = {
   credentialId: 'hydradb.credential_id',
   /** 'true': HydraDB is this brain's search backend (search/hydra-primary.ts). */
   primary: 'hydradb.primary',
+  mode: 'hydradb.mode',
   /** Mirror keyset `{ updatedAt, slug }` over `updated_asc`, JSON. */
   pagesCursor: 'hydradb.pages_cursor',
   /** Soft-deletes after this instant are not yet removed from the cloud. */
@@ -34,6 +36,9 @@ export const HYDRADB_CONFIG = {
   sourceStates: 'hydradb.source_states',
   lastPushAt: 'hydradb.last_push_at',
 } as const;
+
+export type HydraQueryMode = 'fast' | 'thinking';
+export const hydraQueryMode = (value: string | null | undefined): HydraQueryMode => value === 'thinking' ? 'thinking' : 'fast';
 
 export interface HydraConnection {
   database: string;
@@ -132,8 +137,8 @@ export function hydraDocId(sourceId: string, slug: string): string {
  * identity, under gbrain-prefixed names because HydraDB reserves system names
  * such as `source_id`.
  */
-export function hydraDocMetadata(sourceId: string, slug: string, page?: { type: string; effective_date?: Date | null }): Record<string, string> {
-  return { gbrain_source: sourceId, gbrain_slug: slug, ...(page ? { gbrain_type: page.type,
+export function hydraDocMetadata(sourceId: string, slug: string, page?: { type: string; effective_date?: Date | null; knowledge_revision?: string }): Record<string, string> {
+  return { gbrain_source: sourceId, gbrain_slug: slug, ...(page ? { gbrain_type: page.type, ...(page.knowledge_revision ? { gbrain_revision: page.knowledge_revision } : {}),
     ...(page.effective_date ? { gbrain_date: new Date(page.effective_date).toISOString() } : {}) } : {}) };
 }
 
@@ -143,6 +148,7 @@ export interface HydraHit {
   sourceId: string;
   slug: string;
   metadata: Record<string, unknown>;
+  evidence?: HydraEvidence;
 }
 
 /**
@@ -151,20 +157,31 @@ export interface HydraHit {
  * (hydraDocMetadata); a hit without that metadata (not written by the mirror)
  * is dropped.
  */
-export async function queryHydra(conn: HydraConnection, query: string, opts: { sources?: string[]; types?: string[]; maxResults: number; timeoutMs?: number }): Promise<HydraHit[]> {
-  const data = await hydraRequest<{ chunks?: Array<{ source_title?: string; chunk_content?: string; additional_metadata?: Record<string, unknown> }> }>(
+export async function queryHydraResponse(conn: HydraConnection, query: string, opts: { sources?: string[]; types?: string[]; maxResults: number; timeoutMs?: number; mode?: HydraQueryMode }): Promise<HydraResponse> {
+  const deadline = opts.timeoutMs ? Date.now() + opts.timeoutMs : undefined;
+  const data = await hydraRequest<HydraResponse>(
     conn, 'POST', '/query', {
       json: {
-        database: conn.database, query, type: 'knowledge', mode: 'fast', max_results: opts.maxResults,
+        database: conn.database, query, type: 'knowledge', mode: opts.mode ?? 'fast', query_by: 'hybrid', graph_context: true, max_results: opts.maxResults,
         ...(opts.sources || opts.types ? { metadata_filters: { additional_metadata: {
           ...(opts.sources ? { gbrain_source: opts.sources } : {}), ...(opts.types ? { gbrain_type: opts.types } : {}),
         } } } : {}),
       },
       timeoutMs: opts.timeoutMs,
     });
-  return (data?.chunks ?? []).flatMap((c) => {
-    const { gbrain_source: sourceId, gbrain_slug: slug } = c.additional_metadata ?? {};
-    if (typeof sourceId !== 'string' || typeof slug !== 'string' || !c.chunk_content) return [];
-    return [{ title: c.source_title?.replace(/\.md$/, '') || slug, text: c.chunk_content, sourceId, slug, metadata: c.additional_metadata ?? {} }];
-  });
+  if (!data || typeof data !== 'object' || !Array.isArray(data.chunks)) throw new Error('HydraDB returned no structured evidence for its Markdown.');
+  // Unified databases carry context_id instead of repeating the source metadata.
+  const known = new Set((data.sources ?? []).map(s => s.id));
+  const missing = [...new Set([...data.chunks, ...hydraRelatedChunks(data)].filter(c => c.context_id && !c.additional_metadata && !known.has(c.context_id)).map(c => c.context_id as string))];
+  if (missing.length) {
+    if (deadline && Date.now() >= deadline) throw new Error('HydraDB source lookup exceeded the search timeout.');
+    const listed = await hydraRequest<{ sources?: Array<Record<string, unknown>> }>(conn, 'POST', '/context/list',
+      { json: { database: conn.database, type: 'knowledge', ids: missing, page_size: Math.min(1000, missing.length) }, timeoutMs: deadline ? Math.max(1, deadline - Date.now()) : undefined });
+    data.sources = [...(data.sources ?? []), ...(listed.sources ?? [])];
+  }
+  return data;
+}
+
+export async function queryHydra(conn: HydraConnection, query: string, opts: { sources?: string[]; types?: string[]; maxResults: number; timeoutMs?: number; mode?: HydraQueryMode }): Promise<HydraHit[]> {
+  return hydraHits(await queryHydraResponse(conn, query, opts));
 }

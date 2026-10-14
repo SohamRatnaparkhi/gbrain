@@ -28,6 +28,7 @@ import { invalidParam, paramUse } from './op-fix.ts';
 import { assertExplicitSourceLive, federatedSearchScope, parseSourceIdParam, sourceScopeOpts, stampEvidenceSafe } from './context.ts';
 import { markKeywordHits } from '../search/evidence.ts';
 import { hybridSearchCached, stampContentFlags, type HybridSearchOpts } from '../search/hybrid.ts';
+import { markdownForHydraRows } from '../hydradb-response.ts';
 import { hydraPrimarySearch } from '../search/hydra-primary.ts';
 import { dedupResults } from '../search/dedup.ts';
 import { bumpLastRetrievedAt } from '../last-retrieved.ts';
@@ -500,6 +501,7 @@ const recall: Operation = {
 
     if (queryText && question === null && !entityParam && !sessionParam && !since && p.supersessions !== true) ctx.emitNotice?.(recallHintNotice(p, queryText));
     let searchResults: SearchResult[] = [];
+    const cloud: { mode?: 'fast' | 'thinking'; original: SearchResult[] } = { original: [] };
     let searchDegraded: string | undefined;
     let delivery: DeliveryMeta | undefined;
     const evidencePlan = queryText ? await recallEvidencePlan(ctx, p) : null;
@@ -515,9 +517,10 @@ const recall: Operation = {
       // untrusted callers with the excludePrivate resolved above.
       const found = await recallPageRows(ctx, queryText, limit, excludePrivate, searchScope, rankCutOpts);
       searchResults = found.results; searchDegraded = found.degraded;
+      cloud.mode = found.mode; cloud.original = searchResults;
       bumpLastRetrievedAt(ctx.engine, searchResults.map(r => r.page_id));
       const applied = recallDeliveryPlan(effectivePlan(evidencePlan, searchResults), p.budget_policy, queryText, budgetTokens, rows);
-      if (applied) ({ results: searchResults, delivery } = await deliverEvidence(ctx.engine, searchResults, applied, { ...searchScope, excludePrivate, requireSafeChunks: ctx.remote !== false }));
+      if (applied && !cloud.mode) ({ results: searchResults, delivery } = await deliverEvidence(ctx.engine, searchResults, applied, { ...searchScope, excludePrivate, requireSafeChunks: ctx.remote !== false }));
       searchResults = await stampPageTrust(ctx.engine, searchResults, eligibility.floor);
     }
 
@@ -558,6 +561,7 @@ const recall: Operation = {
 
     const budgetPacking = recallBudgetPacking(p.budget_policy, queryText, budgetTokens, { rows, packedFacts, searchResults, packedResults }, recallResultCost(delivery));
 
+    if (cloud.mode) ctx.emitResponseMeta?.('hydradb', { mode: cloud.mode, markdown: markdownForHydraRows(packedResults, cloud.original, budgetTokens !== null) });
     return {
       facts: await withFactDateHeaders(ctx.engine, await stampRowTrust(ctx.engine, 'facts', packedFacts.map(r => ({ // #5575 A6: + trust_tier, origin, unconfirmed
         id: r.id,
@@ -1332,10 +1336,11 @@ export const factsOperations: Operation[] = [
 /** Cloud primary precedes local embedding capability; the original local behavior remains the fallback. */
 async function recallPageRows(ctx: OperationContext, queryText: string, limit: number, excludePrivate: boolean,
   searchScope: { sourceId?: string; sourceIds?: string[]; minTrust?: import('../trust/tier.ts').TrustTier },
-  rankCutOpts: Pick<HybridSearchOpts, 'pageRankCut'>): Promise<{ results: SearchResult[]; degraded?: string }> {
+  rankCutOpts: Pick<HybridSearchOpts, 'pageRankCut'>): Promise<{ results: SearchResult[]; degraded?: string; mode?: 'fast' | 'thinking' }> {
   const opts = { limit, excludePrivate, requireSafeChunks: ctx.remote !== false, takesHoldersAllowList: readHolders(ctx), ...searchScope, ...rankCutOpts };
-  const cloud = await hydraPrimarySearch(ctx.engine, queryText, opts, limit);
-  if (cloud !== null) return { results: cloud };
+  let mode: 'fast' | 'thinking' | undefined;
+  const cloud = await hydraPrimarySearch(ctx.engine, queryText, { ...opts, onMeta: m => { mode = m.hydradb_mode; } }, limit);
+  if (cloud !== null) return { results: cloud, mode };
   const keywordOnly = await recallKeywordOnlyReason(ctx);
   if (keywordOnly) return { results: await keylessRecallRows(ctx, queryText, limit, excludePrivate, searchScope, rankCutOpts), degraded: keywordOnly };
   return { results: await hybridSearchCached(ctx.engine, queryText, { ...opts, expansion: false, _hydraTried: true }) };

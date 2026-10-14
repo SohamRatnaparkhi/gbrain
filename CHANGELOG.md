@@ -14,7 +14,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 **Choose HydraDB for durable cloud memory, and keep local memory as your fallback.**
 
-You can now connect your brain to HydraDB with `gbrain cloud connect`. Natural-language queries,
+You can now connect your brain to HydraDB with `gbrain cloud connect`. Fast retrieval is the default; `gbrain cloud mode thinking` selects thinking mode. Agents receive Markdown context using HydraDB’s SDK formatter, with permitted graph and dated evidence. Natural-language queries,
 search and recall use the cloud even when your brain has no embedding-provider key.
 Pages remain available locally, and turning cloud memory off restores local search.
 Existing gstack context queries use the selected backend.

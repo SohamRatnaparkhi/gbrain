@@ -11,6 +11,8 @@ import { readHolders } from './context.ts';
  */
 
 import { hybridSearchCached, stampContentFlags, stampUnverifiedExtractions } from '../search/hybrid.ts';
+import { markdownForHydraRows } from '../hydradb-response.ts';
+import { enforceTokenBudget } from '../search/token-budget.ts';
 import { hydraPrimaryEnabled, usesHydraSearch } from '../search/hydra-primary.ts';
 import { anchorOpResults } from '../search/entity-anchor.ts';
 import { applyQueryArms } from '../search/query-arms.ts';
@@ -118,7 +120,7 @@ function searchOutput(ctx: OperationContext, p: Record<string, unknown>, results
   const shown = ctx.remote !== false || p.fields !== undefined ? { rows } : {};
   // Stage timings are read last, after the returned rows are assembled (meta only, never content).
   const emit = (output: { meta: Record<string, unknown> }, returned: SearchResult[]) => {
-    ctx.emitResponseMeta?.('retrieval', { ...output.meta, timings: timings.snapshot() });
+    ctx.emitResponseMeta?.('retrieval', { ...output.meta, ...(meta.backend === 'hydradb' ? { hydradb: { mode: meta.hydradb_mode ?? 'fast', markdown: markdownForHydraRows(returned, results, typeof p.token_budget === 'number') } } : {}), timings: timings.snapshot() });
     return returned;
   };
   if (!evidence) {
@@ -179,6 +181,7 @@ async function evidencePlanFor(ctx: OperationContext, p: Record<string, unknown>
  */
 async function withEvidence(ctx: OperationContext, p: Record<string, unknown>, results: SearchResult[], plan: EvidencePlan | null,
   scope: DeliveryScope, meta: HybridSearchMeta | null): Promise<{ rows: SearchResult[]; evidence?: { delivery: DeliveryMeta; explicitSnippet: boolean } }> {
+  if (usesHydraSearch(meta)) return { rows: plan?.budgetExplicit ? enforceTokenBudget(results, plan.budgetTokens).results : results };
   const applied = effectivePlan(plan, results);
   if (!applied) return { rows: results };
   const d = await deliverEvidence(ctx.engine, results, applied, { ...scope, requireSafeChunks: ctx.remote !== false }, { liveHits: meta?.cache?.status !== 'hit' });
@@ -487,7 +490,7 @@ async function buildRetrievalResponseMeta(
     returned_count: results.length,
     retrieved_count: m?.retrieved_count ?? results.length,
     ...(m ? {
-      vector_enabled: m.vector_enabled,
+      vector_enabled: m.vector_enabled, ...(m.backend ? { backend: m.backend, hydradb_mode: m.hydradb_mode } : {}),
       expansion_applied: m.expansion_applied,
       ...(m.cache ? { cache: m.cache.status } : {}),
       ...(m.token_budget ? { token_budget: m.token_budget } : {}),

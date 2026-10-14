@@ -19,6 +19,8 @@ const { PGLiteEngine } = await import('../../src/core/pglite-engine.ts');
 const { submitPageMutation } = await import('../../src/core/persistence/page-mutations.ts');
 const { runCloud } = await import('../../src/commands/cloud.ts');
 const { handleToolCall } = await import('../../src/mcp/server.ts');
+const { dispatchToolCall } = await import('../../src/mcp/dispatch.ts');
+const { unpackToolResult } = await import('../../src/core/mcp-client.ts');
 const { HYDRADB_CONFIG, hydraRequest, resolveHydraConnection } = await import('../../src/core/hydradb.ts');
 const { mirrorBrain } = await import('../../src/core/hydradb-mirror.ts');
 const { drainAllBackgroundWorkForCliExit } = await import('../../src/core/background-work.ts');
@@ -62,6 +64,19 @@ try {
     assert.ok(!JSON.stringify(result).includes('private synthetic canary'), `${op} excludes private memory`);
     checks.push(`${op} on a second keyless brain`);
   }
+  for (const mode of ['fast', 'thinking']) {
+    await runCloud(b, ['mode', mode]);
+    const markdown = await dispatchToolCall(b, 'query', { query: 'When is the cobalt widget deployment scheduled?', source_id: source, expand: false, limit: 8 },
+      { remote: false, transport: 'stdio', sourceId: source, config: { engine: 'pglite' } as never, logger });
+    const meta = markdown._meta?.retrieval as { backend?: string; hydradb_mode?: string } | undefined;
+    assert.equal(meta?.backend, 'hydradb', `${mode} must use cloud rather than local fallback`);
+    assert.equal(meta?.hydradb_mode, mode);
+    assert.ok(markdown.content[0]?.text.includes('Thursday'), `${mode} returns readable Markdown`);
+    assert.ok(!markdown.content[0]?.text.startsWith('[{'), `${mode} returns text rather than a chunk JSON array`);
+    assert.ok(Array.isArray(unpackToolResult(markdown)), 'structured results are available');
+    checks.push(`${mode} Markdown and structured MCP output`);
+  }
+  await runCloud(b, ['mode', 'fast']);
   const paged = await handleToolCall(b, 'query', { query: 'cobalt widget deployment', source_id: source, expand: false, types: ['note'], limit: 8 });
   assert.ok(JSON.stringify(paged).includes('Thursday'), 'type-filtered query still uses HydraDB');
   checks.push('filtered cloud query');
