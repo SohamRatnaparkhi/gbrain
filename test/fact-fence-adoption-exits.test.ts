@@ -10,6 +10,8 @@
  * - A deterministic refusal of the same intent is not resubmitted within a
  *   day, so cycles stop minting identical failed requests; a day later, or a
  *   changed adoption planner, retries once.
+ * - A suppressed page does not count against the request-ID cap: only pages
+ *   that will submit are checked before the fence step admits anything.
  * - One unadoptable legacy row no longer stops the phantom-redirect pass for
  *   the whole source; only a phantom that owns legacy rows is held.
  * Seams: planFence against an engine stub, the managed-brain helper for the
@@ -24,7 +26,8 @@ import { fenceCellReadBackProblem, parseFactsFence, renderFactsTable, replaceOrI
 import { fenceUnfencedFacts, planFence, planUnfencedFacts, type UnfencedFactRow } from '../src/core/facts/unfenced-facts.ts';
 import { runExtractFacts } from '../src/core/cycle/extract-facts.ts';
 import { serializePageToMarkdown } from '../src/core/markdown.ts';
-import { FACT_FENCE_PLANNER, maintenancePreflight, submitFactFenceAdoption } from '../src/core/persistence/prepared-maintenance.ts';
+import { FACT_FENCE_PLANNER, maintenancePreflight, planFactFenceAdoption, submitFactFenceAdoption } from '../src/core/persistence/prepared-maintenance.ts';
+import { principalKey } from '../src/core/persistence/model.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { declarePersistenceProtocol } from '../src/core/persistence/protocol.ts';
 import { managedBrain } from './helpers/managed-brain.ts';
@@ -125,6 +128,43 @@ for (const backend of testBackends()) {
       // The planner revision is part of the intent, so a planner change gets a fresh identity rather than replaying the refusal.
       expect(await engine.executeRaw(`SELECT 1 FROM persistence_requests WHERE slug=$1 AND (intent->>'planner')::int=$2`, [LEGACY_FILE_SLUG, FACT_FENCE_PLANNER])).toHaveLength(2);
     }, { databaseUrl, setup: async ({ engine, root }) => { seed = await seedLegacyManagedContent(engine, root); } });
+  }, 120_000);
+
+  test(`${backend}: a suppressed page does not count against the request-ID cap, so it never refuses the fence step`, async () => {
+    await managedBrain(async ({ engine }) => {
+      const plan = await planUnfencedFacts(engine, { sourceId: 'default' });
+      for (const key of [...plan.groups.keys()]) if (key !== `default\0${LEGACY_FILE_SLUG}`) plan.groups.delete(key);
+      const group = plan.groups.get(`default\0${LEGACY_FILE_SLUG}`)!;
+      const authority = (await maintenancePreflight(engine, 'default'))!;
+      const snapshot = (await engine.readPageSnapshot(LEGACY_FILE_SLUG, { sourceId: 'default' }))!;
+      const fence = await planFence(engine, 'default', LEGACY_FILE_SLUG, serializePageToMarkdown(snapshot.page, snapshot.tags), group);
+      if ('warnings' in fence) throw new Error(fence.warnings.join('; '));
+      const planned = await planFactFenceAdoption(engine, authority, LEGACY_FILE_SLUG, { content: fence.body, expectedRevision: snapshot.revision,
+        assignments: fence.assignments.map(a => ({ id: Number(a.id), row_num: a.row_num })) });
+      if (planned.kind !== 'submit') throw new Error('expected a fresh plan');
+      const principal = authority.writer.principal;
+      await engine.transaction(async tx => {
+        await declarePersistenceProtocol(tx);
+        // The identical adoption was refused as a planning defect an hour ago, and the principal sits exactly at its lifetime-ID cap.
+        await tx.executeRaw(`INSERT INTO persistence_requests(principal_kind,principal_id,request_id,operation,source_id,source_incarnation,slug,digest,authority,intent_bytes,
+            terminal_reservation,state,error_code,error_message,completed_at,updated_at)
+          VALUES($1,$2,$3::uuid,'submit_job','default',(SELECT incarnation FROM sources WHERE id='default'),$4,'refused','{}'::jsonb,0,0,'failed','fence_unrenderable',
+            'The adopted fence row does not render its legacy fact.',now()-interval '1 hour',now()-interval '1 hour')`,
+        [principal.kind, principal.id, planned.requestId, LEGACY_FILE_SLUG]);
+        await tx.executeRaw(`INSERT INTO persistence_counters(key) VALUES($1) ON CONFLICT DO NOTHING`, [principalKey(principal)]);
+        await tx.executeRaw(`UPDATE persistence_counters SET lifetime_ids=1000 WHERE key=$1`, [principalKey(principal)]);
+      });
+      await engine.setConfig('persistence.limits.principal_lifetime_ids', '1000');
+      const outcome = await fenceUnfencedFacts(engine, plan);
+      expect(outcome.unadoptable_rows.filter(r => r.slug === LEGACY_FILE_SLUG && r.class === 'prior_refusal').length).toBe(fence.assignments.length);
+      expect(outcome.fenced).toBe(0);
+      // A page that would submit still needs its ID: the same cap refuses once the refusal no longer suppresses it.
+      await engine.transaction(async tx => {
+        await declarePersistenceProtocol(tx);
+        await tx.executeRaw(`UPDATE persistence_requests SET completed_at=now()-interval '25 hours' WHERE request_id=$1::uuid`, [planned.requestId]);
+      });
+      await expect(fenceUnfencedFacts(engine, await planUnfencedFacts(engine, { sourceId: 'default' }))).rejects.toMatchObject({ code: 'queue_capacity' });
+    }, { databaseUrl, setup: async ({ engine, root }) => { await seedLegacyManagedContent(engine, root); } });
   }, 120_000);
 
   test(`${backend}: a legacy fact that changes after planning is not overwritten by the older plan`, async () => {

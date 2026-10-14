@@ -63,6 +63,7 @@ import { assertSourceFilesystemActive, hasSourceFilesystemLock, withSourceFilesy
 import { withPageLock } from '../page-lock.ts';
 import { maintenanceTransaction } from '../persistence/attribution.ts';
 import { assertLifetimeIdHeadroom } from '../persistence/journal.ts';
+import { OperationError } from '../ops/contract.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
 import { maintenancePreflight, planFactFenceAdoption, submitPlannedFactFenceAdoption, type MaintenanceAuthority } from '../persistence/prepared-maintenance.ts';
 import { contentHash } from '../utils.ts';
@@ -373,6 +374,31 @@ function recordUnadoptable(outcome: UnfencedFactsOutcome, slug: string, records:
   outcome.failed_pages.push(unadoptableRowsToken(slug, records));
 }
 
+/** One managed page, planned read-only: what the adoption would do with it right now. */
+type ManagedPagePlan =
+  | { kind: 'no_page' }
+  | { kind: 'warnings'; warnings: string[] }
+  | { kind: 'unadoptable'; records: UnadoptableFactRecord[] }
+  | { kind: 'submit'; snapshot: NonNullable<Awaited<ReturnType<BrainEngine['readPageSnapshot']>>>; fence: { body: string; assignments: Array<{ id: string; row_num: number }>; rejected: UnadoptableFactRecord[] };
+      request: Extract<Awaited<ReturnType<typeof planFactFenceAdoption>>, { kind: 'submit' }> };
+
+async function planManagedPage(engine: BrainEngine, authority: MaintenanceAuthority, sourceId: string, entitySlug: string, group: UnfencedFactRow[]): Promise<ManagedPagePlan> {
+  const snapshot = await engine.readPageSnapshot(entitySlug, { sourceId });
+  if (!snapshot) return { kind: 'no_page' };
+  const fence = await planFence(engine, sourceId, entitySlug, serializePageToMarkdown(snapshot.page, snapshot.tags), group);
+  if ('warnings' in fence) return { kind: 'warnings', warnings: fence.warnings };
+  if (fence.assignments.length === 0) return { kind: 'unadoptable', records: fence.rejected };
+  const request = await planFactFenceAdoption(engine, authority, entitySlug, {
+    content: fence.body, expectedRevision: snapshot.revision,
+    assignments: fence.assignments.map(a => ({ id: Number(a.id), row_num: a.row_num })),
+  });
+  if (request.kind === 'suppressed') {
+    return { kind: 'unadoptable', records: [...fence.rejected, ...fence.assignments.map(a => ({ source_id: sourceId, slug: entitySlug,
+      fact_id: Number(a.id), reason: 'fence_unrenderable' as const, class: 'prior_refusal' as const, request_id: request.prior.request_id }))] };
+  }
+  return { kind: 'submit', snapshot, fence, request };
+}
+
 /**
  * Managed brains (#5728 class): the managed writer guard refuses direct fence
  * writes into the canonical worktree and any raw `UPDATE facts`. Each page
@@ -388,31 +414,32 @@ async function fenceManaged(engine: BrainEngine, plan: UnfencedFactsPlan): Promi
     const sourceId = key.split('\0')[0];
     if (!authorities.has(sourceId)) authorities.set(sourceId, (await maintenancePreflight(engine, sourceId))!);
   }
-  // One admission per page: refuse up front, before any page publishes,
-  // when the permanent request-ID caps cannot cover them all.
+  // One admission per page that will submit: refuse up front, before any page publishes, when the permanent
+  // request-ID caps cannot cover them. Every page fitting is the common case and costs one read; only when it
+  // would refuse does a read-only pre-pass count the pages that will actually submit, so a page that is suppressed
+  // (an identical adoption was refused within the day), unadoptable or gone never pushes the step over the cap.
+  // The submit loop below plans each page again right before it submits, so the plan it publishes is never
+  // older than its own read (the facts-changed-since-planning guard keeps its short window).
   const [first] = authorities.values();
-  if (first) await assertLifetimeIdHeadroom(engine, first.writer.principal, groups.size);
+  if (first) await assertLifetimeIdHeadroom(engine, first.writer.principal, groups.size).catch(async (error: unknown) => {
+    if (!(error instanceof OperationError) || error.code !== 'queue_capacity') throw error;
+    let submitting = 0;
+    for (const [key, group] of groups) {
+      const [sourceId, entitySlug] = key.split('\0');
+      try { if ((await planManagedPage(engine, authorities.get(sourceId)!, sourceId, entitySlug, group)).kind === 'submit') submitting++; }
+      catch { submitting++; }
+    }
+    await assertLifetimeIdHeadroom(engine, first.writer.principal, submitting);
+  });
   for (const [key, group] of groups) {
     const [sourceId, entitySlug] = key.split('\0');
     try {
       const authority = authorities.get(sourceId)!;
-      const snapshot = await engine.readPageSnapshot(entitySlug, { sourceId });
-      if (!snapshot) { outcome.skipped_no_page += group.length; continue; }
-      const fence = await planFence(engine, sourceId, entitySlug, serializePageToMarkdown(snapshot.page, snapshot.tags), group);
-      if ('warnings' in fence) {
-        outcome.failed_pages.push(`${entitySlug} (${fence.warnings.join('; ')})`);
-        continue;
-      }
-      if (fence.assignments.length === 0) { recordUnadoptable(outcome, entitySlug, fence.rejected); continue; }
-      const request = await planFactFenceAdoption(engine, authority, entitySlug, {
-        content: fence.body, expectedRevision: snapshot.revision,
-        assignments: fence.assignments.map(a => ({ id: Number(a.id), row_num: a.row_num })),
-      });
-      if (request.kind === 'suppressed') {
-        recordUnadoptable(outcome, entitySlug, [...fence.rejected, ...fence.assignments.map(a => ({ source_id: sourceId, slug: entitySlug,
-          fact_id: Number(a.id), reason: 'fence_unrenderable' as const, class: 'prior_refusal' as const, request_id: request.prior.request_id }))]);
-        continue;
-      }
+      const page = await planManagedPage(engine, authority, sourceId, entitySlug, group);
+      if (page.kind === 'no_page') { outcome.skipped_no_page += group.length; continue; }
+      if (page.kind === 'warnings') { outcome.failed_pages.push(`${entitySlug} (${page.warnings.join('; ')})`); continue; }
+      if (page.kind === 'unadoptable') { recordUnadoptable(outcome, entitySlug, page.records); continue; }
+      const { snapshot, fence, request } = page;
       if (factsChangedSincePlanning(fence.body, fence.assignments, request.facts)) {
         outcome.failed_pages.push(`${entitySlug} (a legacy fact changed after its fence row was planned; nothing was submitted and the next run replans it)`);
         continue;

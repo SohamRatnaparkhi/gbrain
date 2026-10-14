@@ -16,6 +16,8 @@ import { bigintToStringReplacer } from '../core/utils.ts';
 
 export const WRITER_HELP = `Usage:
   gbrain sources writer status [<source>] [--probe] [--json]
+  gbrain sources writer failures <source> [--state all] [--group-by category] [--since 7d] [--limit 20] [--before <cursor>]
+    [--category <c>] [--code <c>] [--origin <o>|none] [--json]
   gbrain sources writer movement [<source>] [--wait <dur>] [--warn-only] [--json]
   gbrain sources writer retry-effects <source> --request-id <uuid> [--dry-run] [--json]
   gbrain sources writer git-durability <source> --enable|--disable [--pat-file <path>] [administration options] [--dry-run] [--json]
@@ -27,6 +29,13 @@ export const WRITER_HELP = `Usage:
   gbrain sources writer lock [--json]
   gbrain sources writer unlock [--json]
 
+failures (read-only) lists the source's write receipts that ended without committing
+(failed, conflict, cancelled) plus any still holding a recovery record, newest first, each
+with its class, safe actions, whether a person decides, its disposition (superseded,
+already_written, duplicate or unknown), an inspect command and its fix. --group-by category
+groups them on code, origin and category, each group with its exact drill-down filter.
+A full page prints truncated with the next command (--before <cursor>). Unresolved rows by
+default; --state all adds resolved and historical ones. Human table by default, JSON with --json.
 Inspect status first. movement proves that managed sync data moves over a window
 (committed pages and the head's step, never a lease or a lock): run it after
 restarting serve and the workers; see movement --help for its states and exits.
@@ -133,6 +142,7 @@ export function parsePersistenceAdminArgs(group: Group, args: string[]): {
     '--source-ids': 'source_ids', '--scopes': 'scopes', '--allowed-operations': 'allowed_operations',
     '--slug-prefixes': 'slug_prefixes', '--limit': 'limit', '--before': 'before',
     '--admin-intent': 'admin_intent', '--expected-state': 'expected_state', '--request-id': 'request_id', '--pat-file': 'pat_file',
+    '--state': 'state', '--group-by': 'group_by', '--since': 'since', '--code': 'code', '--origin': 'origin', '--category': 'category',
   };
   const arrays = new Set(['source_ids', 'scopes', 'allowed_operations', 'slug_prefixes']);
   const seen = new Set<string>();
@@ -163,6 +173,7 @@ export function parsePersistenceAdminArgs(group: Group, args: string[]): {
   if (group === 'writer') {
     const verb = positional.shift();
     if (verb === 'status') operation = 'writer_status';
+    else if (verb === 'failures') operation = 'writer_failures';
     else if (verb === 'retry-effects') operation = 'writer_retry_effects';
     else if (verb === 'git-durability') operation = 'writer_git_durability';
     else if (verb === 'claim') operation = 'writer_claim';
@@ -175,7 +186,7 @@ export function parsePersistenceAdminArgs(group: Group, args: string[]): {
       if (phase !== 'prepare' && phase !== 'accept') throw invalid(group, 'Transfer requires prepare or accept.',
         'Run gbrain sources writer transfer prepare on the current owner host first, then gbrain sources writer transfer accept on the successor with the epoch and manifest prepare printed.');
       operation = phase === 'prepare' ? 'writer_transfer_prepare' : 'writer_transfer_accept';
-    } else throw invalid(group, 'Writer administration requires status, movement, retry-effects, git-durability, claim, activate, deactivate, transfer, lock, or unlock.',
+    } else throw invalid(group, 'Writer administration requires status, failures, movement, retry-effects, git-durability, claim, activate, deactivate, transfer, lock, or unlock.',
       `Name the action after gbrain sources writer${verb ? ` instead of ${verb}` : ''}; start with gbrain sources writer status --json, which changes nothing.`);
     const source = positional.shift();
     if (source !== undefined) {
@@ -226,6 +237,12 @@ export async function runPersistenceAdminCli(group: Group, args: string[], conne
         brainId === 'host' ? 'owner' : 'mounted_database');
     }
     if (['writer_status', 'writer_lock', 'writer_unlock'].includes(parsed.operation)) result = { selected_brain: brainId, ...(result as Record<string, unknown>) };
+    // #6650: the failures drill-down prints a table for a person and JSON only with --json (fixes rendered for the CLI either way).
+    if (parsed.operation === 'writer_failures') {
+      const { renderWriterFailures } = await import('./sources-writer-failures.ts');
+      await writeStdoutFinal(renderWriterFailures(result as Parameters<typeof renderWriterFailures>[0], parsed.json));
+      return;
+    }
     await writeStdoutFinal(JSON.stringify(result, bigintToStringReplacer, 2) + '\n');
   } catch (error) {
     if (!await reportPersistenceCliError(error, args.includes('--json'))) {

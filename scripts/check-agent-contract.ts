@@ -266,6 +266,8 @@ const READ_ONLY_SUBCOMMANDS = new Set(['config get', 'sources list', 'sources st
   'schema active',
   // #6317: trusted-local writer administration reads (owners, running claims, consumers, movement); `sources writer claim|transfer|deactivate` stay mutating.
   'sources writer status', 'sources writer movement',
+  // #6650: the terminal-failure drill-down and the sync operator status only read receipts and cursors.
+  'sources writer failures', 'sync status',
   // #6466: `--list` returns before the orchestration lock and never runs an orchestrator or writes the ledger.
   'apply-migrations --list']);
 

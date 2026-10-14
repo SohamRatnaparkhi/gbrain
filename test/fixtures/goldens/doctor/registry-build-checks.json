@@ -407,6 +407,10 @@
       },
       {
         "category": "ops",
+        "name": "persistence_terminal_failures"
+      },
+      {
+        "category": "ops",
         "name": "persistence_session_timeouts"
       },
       {

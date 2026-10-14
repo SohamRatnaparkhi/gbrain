@@ -12,44 +12,18 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.222.0] - 2026-10-14
 
-**Choose HydraDB for durable cloud memory, and keep local memory as your fallback.**
-
-You can now connect your brain to HydraDB with `gbrain cloud connect`. Fast retrieval is the default; `gbrain cloud mode thinking` selects thinking mode. Agents receive Markdown context using HydraDB’s SDK formatter, with permitted graph and dated evidence. Natural-language queries,
-search and recall use the cloud even when your brain has no embedding-provider key.
-Pages remain available locally, and turning cloud memory off restores local search.
-Existing gstack context queries use the selected backend.
-
-### How to turn it on
-
-Run `gbrain cloud connect` and review what will be shared. Get an API key from the
-HydraDB dashboard, then follow the prompt. For gstack context loading, set
-`GSTACK_BRAIN_TIMEOUT_MS=10000` in your agent's environment.
-
-| Your choice | What happens |
-| --- | --- |
-| Cloud primary on | HydraDB retrieves and ranks natural-language page searches. |
-| Cloud primary off | Local search resumes; pages still sync to HydraDB. |
-| Disconnect | Cloud sync stops; local memory keeps working. |
-
-Private pages and private fact rows stay local. Detected secrets are redacted from
-outgoing text and titles. Structured record reads, explicit keyword enumeration,
-image similarity and symbol walks keep their existing local contracts.
+**Writes that ended without committing are now summarized and explained, and the few that block work are named (#6650).** Every write leaves a receipt, and receipts that ended `failed`, `conflict` or `cancelled` used to pile up with no summary: an agent couldn't tell the one that holds a root from hundreds a later write already superseded or an older build left behind. gbrain now classifies each such receipt at read time (category, class, safe actions, whether a person decides, a structured fix) and stores nothing new. A new doctor check, `persistence_terminal_failures`, warns when a receipt blocks work now (a publication recovery record or a sync checkpoint blocker) or when an unresolved receipt is a gbrain-defect class. A 24-hour spike warns only when nothing else does, and a spike written by builds older than the fix says so, names the build and points at the write owner to upgrade or restart. Superseded rows and rows from builds older than their fixing release count as historical and never warn.
 
 ### Itemized changes
 
-- Add opt-in cloud connection, status, indexed backfill, write-through syncing and disconnect commands.
-- Route keyless recall and both hybrid search entry points through the selected cloud backend.
-- Preserve source, type, date, slug and pagination filters without running local relevance ranking.
-- Verify per-item ingestion, indexing and deletion outcomes before advancing mirror cursors.
-- Keep page identities distinct across sources and retry interrupted batches.
-- Reconcile archived/restored sources, expand schema type aliases in cloud searches, serialize PostgreSQL uploads across processes, and preserve shared credentials when one brain disconnects.
-- Add an optional staging endpoint and a synthetic live smoke, including gstack CLI context loading.
-
-### To take advantage of v0.60.222.0
-
-Upgrade GBrain, then run `gbrain cloud connect` if you want HydraDB memory.
-Cloud memory remains off until you explicitly connect. See
-[cloud memory](docs/guides/cloud-memory.md) for setup and off switches.
+- **Classifier** (`src/core/persistence/terminal-classify.ts`): `classifyTerminal` routes each receipt by its recovery record, its typed knock-on marker, and the origin or cause it recorded. A receipt whose code and origin don't say what happened is `diagnosis_required`, and its fix is read-only writer status, never a guess. It also owns the supersession rule `gbrain repair failed-writes` uses.
+- **Bounded readers** (`src/core/persistence/terminal-failures.ts`): one set-based aggregate with a 5 s statement deadline and a 2 s connection deadline; past either the result is `unknown`, never an empty pile. The drill-down scans at most 2,000 receipts per call and pages with a cursor. Thresholds: `persistence.terminal_failures.window_days` (default 7, clamped to `persistence.receipt_retention_days`), `spike_factor` (3) and `spike_min` (25).
+- **`gbrain write-request <id>`** adds `write_error_reason`, `suggestion` and a `diagnosis` with a rendered `fix` for such receipts.
+- **`gbrain sync status`** adds `terminal_failures` (active blockers, unresolved, historical, the drill-down command) and names a recovery record as `next` when nothing else is.
+- **`gbrain sources writer failures <source>`** (read-only) lists the receipts or groups them (`--group-by category`), each group with an exact drill-down filter; a table by default, JSON with `--json`. A resident owner advertises the operation in a new `administration_extensions` capability key, so older clients and owners interoperate.
+- **`/metrics`** (admin only) adds per-source gauges `gbrain_writer_terminal_failures_{active_blockers,unresolved,historical,new_24h,defects}` and `_known`, from one aggregate shared by every scrape for 60 s. `/health` is unchanged.
+- **Fact-fence step** (`src/core/facts/unfenced-facts.ts`): the up-front lifetime-ID check counts only pages that will submit, so a page suppressed by a recent identical refusal, or one with nothing adoptable, no longer pushes the whole step to the cap and refuses it.
+- Docs: [terminal write failures](docs/guides/troubleshooting.md#terminal-write-failures), the troubleshooting row, write-refusals and the maintain skill.
 
 ## [0.60.221.0] - 2026-10-14
 

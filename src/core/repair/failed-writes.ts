@@ -55,12 +55,13 @@ import { getWorktreeBinding } from '../persistence/ownership.ts';
 import { prepareFileTarget } from '../persistence/page-prepare.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { resolveEntitySlugWithSource } from '../entities/resolve.ts';
+import { dispositionOf, PAGE_REMOVAL_OPERATIONS, supersessionOrderSql, supersessionSql } from '../persistence/terminal-classify.ts';
 import { afterCursor, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairPlan, type RepairScope } from './core.ts';
 
 const REPLAYABLE = ['put_page', 'add_timeline_entry', 'remember'];
 const REMEMBER_PREPARED_KEYS = ['entity_slug', 'fence', 'valid_from', 'valid_until', 'entity_inferred', 'entity_warning'];
 const REMOTE_PREPARED_KEYS = ['source_kind', 'source_uri', 'ingested_via'];
-const PAGE_REMOVALS = ['delete_page', 'purge_page'];
+const PAGE_REMOVALS = PAGE_REMOVAL_OPERATIONS;
 const GUARD_REFUSAL = `(r.state='failed' AND (r.error_code='writer_coordinator_required'
   OR (r.error_code='storage_error' AND r.error_message LIKE 'Publication failed (P0001)%')))`;
 /** #6429: a refusal from prepareFileTarget (page-prepare.ts); the receipt keeps the code, not the refusal's detail. */
@@ -255,16 +256,12 @@ async function disposition(engine: BrainEngine, write: FailedWrite): Promise<{ c
   }
   const replace = write.operation === 'put_page';
   const [later] = await engine.executeRaw<{ state: string; operation: string; same_intent: boolean }>(
-    `SELECT state, operation, digest=$3 AS same_intent FROM persistence_requests
-      WHERE source_id=$1 AND slug=$2 AND sequence > $4::bigint AND (
-        (digest=$3 AND state IN ('committed','failed','queued','running','recovering'))
-        OR (state IN ('committed','queued','running','recovering') AND (operation = ANY($6::text[]) OR $5::boolean))
-        OR ($5::boolean AND state='failed' AND operation='put_page' AND NOT (intent ? 'kind')))
-      ORDER BY (digest=$3 AND state='committed') DESC, (digest=$3) DESC, sequence LIMIT 1`,
-    [write.source_id, write.slug, write.digest, write.sequence, replace, PAGE_REMOVALS]);
-  if (later?.same_intent && later.state === 'committed') return { class: 'already_written' };
-  if (later?.same_intent) return { class: 'duplicate', detail: `a later request with the same intent is ${later.state}` };
-  if (later) return { class: 'superseded', detail: `a later ${later.operation} of this page is ${later.state}` };
+    `SELECT c.state, c.operation, c.digest=r.digest AS same_intent FROM persistence_requests r JOIN persistence_requests c ON ${supersessionSql('r', 'c')}
+      WHERE r.id=$1::uuid ORDER BY ${supersessionOrderSql('r', 'c')} LIMIT 1`, [write.id]);
+  const found = dispositionOf(later);
+  if (found === 'already_written') return { class: 'already_written' };
+  if (found === 'duplicate') return { class: 'duplicate', detail: `a later request with the same intent is ${later!.state}` };
+  if (found === 'superseded') return { class: 'superseded', detail: `a later ${later!.operation} of this page is ${later!.state}` };
   const read = write.intent.expected_revision;
   if (replace && typeof read === 'string' && read !== await pageRevision(engine, write.source_id, write.slug)) {
     return { class: 'superseded', detail: 'the page changed after the revision the caller read' };

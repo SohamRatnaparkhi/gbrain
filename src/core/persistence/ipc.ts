@@ -7,7 +7,7 @@ import { readFix } from '../ops/op-fix.ts';
 import type { Action } from '../agent-output.ts';
 import { resolveSocketPathForConfig, socketHasLiveListener } from '../context/resolve-ipc.ts';
 import { isWriteErrorCode, isWriteReceipt, isWriteRequestId, publicWriteReceipt } from './types.ts';
-import { isPersistenceAdminOperation, PERSISTENCE_ADMIN_OPERATIONS, type PersistenceAdminOperation } from './admin-contract.ts';
+import { isPersistenceAdminExtension, isPersistenceAdminOperation, PERSISTENCE_ADMIN_EXTENSIONS, PERSISTENCE_ADMIN_OPERATIONS, type PersistenceAdminExtension, type PersistenceAdminOperation } from './admin-contract.ts';
 import { claimLocalIpcBinding, isWindowsIpcPipe, prepareLocalIpcPath } from '../context/ipc-path.ts';
 
 export const PERSISTENCE_IPC_VERSION = 1;
@@ -65,8 +65,10 @@ export interface PersistenceIpcCapabilities {
   brain_id: string;
   operations: readonly PersistenceIpcOperation[];
   max_frame_bytes: number;
-  /** Optional for protocol compatibility with owners predating local administration. */
+  /** Optional for protocol compatibility with owners predating local administration. Frozen: new operations go in `administration_extensions`. */
   administration?: readonly PersistenceAdminOperation[];
+  /** #6650: administration added after `administration` froze; older clients ignore the key, a client keeps only the entries it knows. */
+  administration_extensions?: readonly PersistenceAdminExtension[];
   /** #5232: the owner honors `write_wait_ms` on operation requests. */
   write_wait?: true;
 }
@@ -231,7 +233,7 @@ export async function startPersistenceIpcServer(
             socket.end(responseFrame({ version: 1, ok: true, result: {
               version: 1, brain_id: provider.brainId, operations: PERSISTENCE_IPC_OPERATIONS,
               max_frame_bytes: PERSISTENCE_IPC_MAX_BYTES,
-              ...(provider.administer ? { administration: PERSISTENCE_ADMIN_OPERATIONS } : {}),
+              ...(provider.administer ? { administration: PERSISTENCE_ADMIN_OPERATIONS, administration_extensions: PERSISTENCE_ADMIN_EXTENSIONS } : {}),
               write_wait: true,
             } satisfies PersistenceIpcCapabilities }));
             return;
@@ -393,7 +395,15 @@ export async function requestPersistenceCapabilities(socketPath: string, timeout
     || value.max_frame_bytes < 1 || value.max_frame_bytes > PERSISTENCE_IPC_MAX_BYTES) {
     throw new PersistenceIpcTransportError(false);
   }
-  return value as unknown as PersistenceIpcCapabilities;
+  // #6650: an extension list is advisory: a malformed one is dropped, an entry this build does not know is ignored.
+  const extensions = Array.isArray(value.administration_extensions) ? value.administration_extensions.filter(isPersistenceAdminExtension) : undefined;
+  const { administration_extensions: _ignored, ...rest } = value;
+  return { ...rest, ...(extensions ? { administration_extensions: extensions } : {}) } as unknown as PersistenceIpcCapabilities;
+}
+
+/** Whether a resident owner's capabilities include an administration operation (a frozen one or an extension). */
+export function ownerAdministers(capability: Pick<PersistenceIpcCapabilities, 'administration' | 'administration_extensions'>, operation: PersistenceAdminOperation): boolean {
+  return isPersistenceAdminExtension(operation) ? capability.administration_extensions?.includes(operation) === true : capability.administration?.includes(operation) === true;
 }
 
 function count(value: unknown): value is number {

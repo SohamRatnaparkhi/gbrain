@@ -199,6 +199,16 @@ writing or reviewing an operation, consult `src/core/operations.ts` for the cont
   the sync it prints; when `needs_human` is true, relay `next.user_message`
   with the slug. Decision table:
   [`docs/guides/sync-unblock-runbook.md`](./docs/guides/sync-unblock-runbook.md).
+- **Writes that ended without committing** (doctor
+  `persistence_terminal_failures`, `terminal write failures` in
+  `gbrain sync status`): the check separates active blockers (a recovery
+  record or a sync checkpoint blocker: run its `fix.command`) from the
+  unresolved pile and from historical rows that need nothing. Group the pile
+  with `gbrain sources writer failures <id> --group-by category` (read-only;
+  each group has a fix and an exact drill-down), read one receipt's
+  `diagnosis.fix` with `gbrain write-request <request> --json`, and relay a
+  group whose `needs_human` is true. Runbook:
+  [terminal write failures](docs/guides/troubleshooting.md#terminal-write-failures).
 - **Migrate / upgrade:** `gbrain upgrade` (binary self-update + schema migrations + post-upgrade prompts),
   [`docs/UPGRADING_DOWNSTREAM_AGENTS.md`](./docs/UPGRADING_DOWNSTREAM_AGENTS.md),
   [`skills/migrations/`](./skills/migrations/), `gbrain apply-migrations --yes --no-autopilot-install` (manual migration orchestration without service installation).

@@ -869,6 +869,58 @@
         {
           "category": "ops",
           "details": {
+            "active_blockers": [],
+            "config": {
+              "receipt_retention_days": 30,
+              "spike_factor": {
+                "key": "persistence.terminal_failures.spike_factor",
+                "value": 3
+              },
+              "spike_min": {
+                "key": "persistence.terminal_failures.spike_min",
+                "value": 25
+              },
+              "window_clamped": false,
+              "window_days": {
+                "key": "persistence.terminal_failures.window_days",
+                "value": 7
+              }
+            },
+            "count": 0,
+            "defects": [],
+            "docs": "docs/guides/troubleshooting.md#terminal-write-failures",
+            "historical_rows": 0,
+            "new_last_24h": 0,
+            "sources": [],
+            "spike": {
+              "daily_7d": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "last_24h": 0,
+              "median_7d": 0,
+              "spiking": false
+            },
+            "unresolved": {
+              "distinct_intents": 0,
+              "distinct_slugs": 0,
+              "oldest_age_seconds": null,
+              "rows": 0
+            },
+            "window_days": 7
+          },
+          "message": "No terminal write failures in the last 7 d.",
+          "name": "persistence_terminal_failures",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "details": {
             "applied": null,
             "configured": "5min",
             "docs": "docs/guides/troubleshooting.md#session-timeouts-not-applied"

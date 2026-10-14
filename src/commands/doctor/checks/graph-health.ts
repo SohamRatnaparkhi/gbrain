@@ -308,6 +308,7 @@ export const timelineHistoryEntry: DoctorEntry = {
     'persistence_request_growth',
     'persistence_write_stall',
     'lost_caller_writes',
+    'persistence_terminal_failures',
     'persistence_session_timeouts',
     'connector_held_items',
     'git_held_files',

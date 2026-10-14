@@ -87,7 +87,31 @@ export interface SyncStatus {
   checkpoint_blockers?: Array<{ request_id: string; slug: string; state: string; code: string | null; index: number | null; recovery: boolean; knock_on: boolean }>;
   /** #6643: every managed-sync cursor of the source under its current incarnation, newest first (at most 20). */
   cursors: SyncStatusCursor[];
+  /** #6650: the source's terminal write receipts that did not commit, summarized (`terminal-failures.ts`); `unknown` when the bounded read timed out. */
+  terminal_failures: SyncTerminalSummary;
   next: Action | null;
+}
+
+export type SyncTerminalSummary = { status: 'unknown'; reason: string } | {
+  status: 'ok'; window_days: number; active_blockers: Array<{ kind: 'recovery' | 'checkpoint'; request_id: string; slug?: string; category: string }>;
+  unresolved: { rows: number; distinct_slugs: number; distinct_intents: number; oldest_age_seconds: number | null };
+  historical_rows: number; new_last_24h: number; defects: number;
+  categories: Array<{ category: string; code: string; origin: string | null; rows: number; unresolved: number }>; drill_down: string[];
+};
+
+/** #6650: the source's slice of the terminal-failure summary, with PR A's checkpoint blockers passed in rather than recomputed. */
+async function terminalSummary(engine: BrainEngine, sourceId: string, blockers: SyncStatus['checkpoint_blockers']): Promise<SyncTerminalSummary & { recovery_next?: Action }> {
+  const { readTerminalFailureSummary } = await import('./terminal-failures.ts');
+  const summary = await readTerminalFailureSummary(engine, { sourceIds: [sourceId], checkpointBlockers: new Map([[sourceId, blockers ?? []]]) });
+  if (summary.status === 'unknown') return { status: 'unknown', reason: summary.reason };
+  const s = summary.sources[0];
+  const recovery = s?.active_blockers.find(b => b.kind === 'recovery');
+  return { status: 'ok', window_days: summary.window_days, ...(recovery ? { recovery_next: recovery.action } : {}),
+    active_blockers: (s?.active_blockers ?? []).map(b => ({ kind: b.kind, request_id: b.request_id, ...(b.slug ? { slug: b.slug } : {}), category: b.category })),
+    unresolved: { rows: s?.unresolved.rows ?? 0, distinct_slugs: s?.unresolved.distinct_slugs ?? 0, distinct_intents: s?.unresolved.distinct_intents ?? 0, oldest_age_seconds: s?.unresolved.oldest_age_seconds ?? null },
+    historical_rows: s?.historical_rows ?? 0, new_last_24h: s?.new_last_24h ?? 0, defects: (s?.defects ?? []).reduce((sum, d) => sum + d.rows, 0),
+    categories: (s?.categories ?? []).slice(0, 10).map(c => ({ category: c.category, code: c.code, origin: c.origin, rows: c.rows, unresolved: c.unresolved })),
+    drill_down: ['gbrain', 'sources', 'writer', 'failures', sourceId, '--group-by', 'category', '--json'] };
 }
 
 interface CursorHeader { runId: string; index: number; total: number; target: string | null; done?: boolean;
@@ -197,10 +221,26 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string): Pro
             : lastError ? `The last run recorded ${lastError.code} (${lastError.class}); this release holds or retries it, and --retry-failed converts the stopped entry in place without re-freezing the manifest.`
             : `The cursor stands at ${header!.index}/${header!.total}; the same command resumes it against the frozen manifest.` }
         : null;
+  const blockers = await checkpointBlockers(engine, header);
+  // #6650: a receipt still holding a recovery record holds its root, so a source with nothing else to do names it as `next`.
+  const { recovery_next, ...terminal } = await terminalSummary(engine, sourceId, blockers.checkpoint_blockers);
   return { source_id: sourceId, run_id: header?.runId ?? null,
     cursor: header ? { index: Number(header.index), total: Number(header.total), pinned_target: header.target ?? null, last_advance_at: p ? new Date(p.lastAt).toISOString() : null, done: !!header.done } : null,
     committed_last_10m: Number(committed?.n ?? 0), ...estimate, holds, last_error: lastError, needs_human: !!human, ...(human ? { human_reason: human.human_reason } : {}),
-    resume_argv: resume, ...(await checkpointBlockers(engine, header)), cursors: await liveCursors(engine, sourceId, source.incarnation, selected?.key ?? null, failures), next };
+    resume_argv: resume, ...blockers, cursors: await liveCursors(engine, sourceId, source.incarnation, selected?.key ?? null, failures),
+    terminal_failures: terminal, next: next ?? recovery_next ?? null };
+}
+
+/**
+ * #6650: `checkpoint_blockers` of the cursor `readSyncStatus` would show for the source, without the rest of the status
+ * (doctor's terminal-failure summary reuses them; it never recomputes the checkpoint's rule).
+ */
+export async function readCheckpointBlockers(engine: BrainEngine, sourceId: string): Promise<NonNullable<SyncStatus['checkpoint_blockers']>> {
+  const [source] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1 AND archived IS NOT TRUE', [sourceId]);
+  if (!source) return [];
+  const failures = (await readManagedSyncFailures(engine, [sourceId])).filter(failure => failure.code !== 'sync_incomplete');
+  const selected = await cursorHeader(engine, sourceId, source.incarnation, failures[0]?.cursor_key ?? null);
+  return (await checkpointBlockers(engine, selected?.header ?? null)).checkpoint_blockers ?? [];
 }
 
 /**

@@ -127,6 +127,14 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     run: async (engine, scope) => (await import('./checks/persistence-requests.ts')).lostCallerWritesCheck(engine, scope.sourceIds),
   },
   {
+    id: 'persistence_terminal_failures', resolution: 'operator', registration: 'wave',
+    hostOnly: 'Request ids, roots and recovery records are brain-host persistence state outside any source scope.',
+    count: d => Number(d.count ?? 0),
+    impact: 'A write receipt that did not commit blocks work now (a recovery record or a checkpoint blocker), or an unresolved receipt is a gbrain-defect class',
+    instruction: 'Run the fix doctor prints, then drill down with `gbrain sources writer failures <source> --group-by category --json` on the brain host (docs/guides/troubleshooting.md#terminal-write-failures).',
+    run: async (engine, scope) => (await (await import('./checks/persistence-requests.ts')).terminalFailuresCheck(engine, scope.sourceIds))!,
+  },
+  {
     id: 'persistence_session_timeouts', resolution: 'operator', registration: 'wave',
     count: d => d.reason === 'session_timeouts_not_applied' ? 1 : 0,
     hostOnly: 'The connection URL and its pooler are brain-host configuration outside any source scope.',

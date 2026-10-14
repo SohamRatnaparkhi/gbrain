@@ -103,6 +103,25 @@ export const CLAIM_BEFORE_ACTIVATION_NOTICE = 'Persistence is not activated. Aft
   + 'file-writing maintenance) refuse while the checkout is managed. Stop older writers, review gbrain sources writer status, '
   + 'then activate deliberately.';
 
+/** #6650: `sources writer failures` options, validated with the usage each one takes. */
+function writerFailuresQuery(sourceId: string, params: Record<string, unknown>): import('./terminal-failures.ts').TerminalFailureQuery {
+  const bad = (key: string, pattern: RegExp) => params[key] !== undefined && (typeof params[key] !== 'string' || !pattern.test(params[key] as string));
+  if (bad('state', /^(all|unresolved)$/)) throw invalid('Invalid --state value.', 'Pass --state all to include resolved and historical receipts, or leave it out for the unresolved ones.');
+  if (bad('group_by', /^category$/)) throw invalid('Invalid --group-by value.', 'Pass --group-by category (groups on code, origin and category), or leave it out to list receipts.');
+  if (bad('since', /^[1-9]\d{0,3}d$/)) throw invalid('Invalid --since value.', 'Pass --since as whole days, e.g. --since 7d; the window is clamped to persistence.receipt_retention_days.');
+  if (bad('before', /^\d{1,19}$/)) throw invalid('Invalid --before value.', 'Pass --before exactly as the previous page\'s next_cursor.');
+  if (bad('code', /^[a-z][a-z0-9_]{0,63}$/)) throw invalid('Invalid --code value.', 'Pass --code as a snake_case code a group names, e.g. --code storage_error.');
+  if (bad('origin', /^[a-z][a-z0-9_]{0,63}$/)) throw invalid('Invalid --origin value.', 'Pass --origin as an origin a group names, or none for receipts with no recorded origin.');
+  if (bad('category', /^[a-z][a-z_]{0,63}$/)) throw invalid('Invalid --category value.', 'Pass --category as a category a group names, e.g. --category knock_on.');
+  if (params.limit !== undefined && !(typeof params.limit === 'number' && Number.isInteger(params.limit) && params.limit >= 1 && params.limit <= 100)) {
+    throw invalid('Invalid --limit value.', 'Pass --limit as a whole number from 1 to 100 (default 20).');
+  }
+  const p = params as { state?: 'all' | 'unresolved'; group_by?: string; since?: string; limit?: number; before?: string; code?: string; origin?: string; category?: string };
+  return { sourceId, ...(p.state ? { state: p.state } : {}), ...(p.group_by ? { groupBy: 'category' as const } : {}), ...(p.since ? { sinceDays: Number(p.since.slice(0, -1)) } : {}),
+    ...(p.limit !== undefined ? { limit: p.limit } : {}), ...(p.before ? { before: p.before } : {}), ...(p.code ? { code: p.code } : {}), ...(p.origin ? { origin: p.origin } : {}),
+    ...(p.category ? { category: p.category } : {}) };
+}
+
 const transferStatusFix = (sourceId: string) =>
   readFix(`Shows source ${sourceId}'s owner binding and prepared transfer, read-only.`, { argv: ['gbrain', 'sources', 'writer', 'status', sourceId, '--json'] });
 
@@ -205,6 +224,14 @@ export async function runPersistenceAdministration(engine: BrainEngine, operatio
       path:params.path===undefined?undefined:path(params.path),name:params.name as string|undefined,config:params.config as Record<string,unknown>|undefined,
       refederate:params.refederate as boolean|undefined,confirmDestructive:params.confirm_destructive as boolean|undefined,dryRun:params.dry_run===true,
       remoteUrl:params.remote_url as string|undefined,createDirectory:params.create_directory as boolean|undefined,expiredOnly:params.expired_only as boolean|undefined});
+  }
+  if (operation === 'writer_failures') {
+    keys(params, ['source_id', 'state', 'group_by', 'since', 'limit', 'before', 'code', 'origin', 'category']);
+    const sourceId = source(params.source_id);
+    const [known] = await engine.executeRaw<{ id: string }>('SELECT id FROM sources WHERE id=$1 AND archived IS NOT TRUE', [sourceId]);
+    if (!known) throw invalid(`No active source ${sourceId}.`, 'Name an active source; archived sources are not inspected.', sourcesListFix('Lists the active source ids, read-only.'));
+    const { readTerminalFailures } = await import('./terminal-failures.ts');
+    return { ...await readTerminalFailures(engine, writerFailuresQuery(sourceId, params)) };
   }
   if (operation === 'writer_status') {
     keys(params, ['source_id', 'probe']);

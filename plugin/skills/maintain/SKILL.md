@@ -526,6 +526,7 @@ Follow the [agent operator protocol](../conventions/agent-operator-protocol.md) 
 - `gbrain doctor --remediate` steps marked "requires user agreement" (PROTECTED repairs, paid steps): show the plan and cost, and run with `--yes --include-repairs --expect <plan_hash> --max-usd <n>` (the hash from `--remediation-plan --json`) only after the user agrees; `preview_changed` means the plan moved, so preview and ask again. A step that would exceed the cap is not started.
 - A finding classified `operator_required`: follow its instruction or relay it to the brain host's operator. `consent_required`: ask the user.
 - A writer-coordination refusal (`writer_coordinator_required`, `writer_not_quiesced`, `recovery_required`): inspect `gbrain sources writer status` and hand the blocked recovery to the operator; never claim a checkout or delete a lock.
+- Doctor warns `persistence_terminal_failures`: run its `fix.command` (an active blocker: a recovery record or a sync checkpoint blocker; or an unresolved gbrain-defect class to report with the receipt ids). For the rest of the pile, `gbrain sources writer failures <source> --group-by category` (read-only) groups receipts with a fix and drill-down per group; historical rows need nothing. Never cancel or edit receipts to clear the count. Runbook: [terminal write failures](https://github.com/garrytan/gbrain/blob/master/docs/guides/troubleshooting.md#terminal-write-failures).
 - `gbrain dream` stops on a budget (exit 11): run the printed `resume_command` within the agreed budget.
 
 ## Anti-Patterns

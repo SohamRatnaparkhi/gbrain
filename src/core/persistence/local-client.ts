@@ -16,7 +16,7 @@ import {
   isPersistenceIpcMutation, isPersistenceIpcOperation, isPersistenceIpcRegistration,
   persistenceSocketPathForConfig, requestPersistenceCapabilities, requestPersistenceOperation,
   PersistenceIpcTransportError, type PersistenceIpcCapabilities, type PersistenceIpcRegistration,
-  requestPersistenceAdministration,
+  requestPersistenceAdministration, ownerAdministers,
 } from './ipc.ts';
 import type { PersistenceAdminOperation } from './admin-contract.ts';
 import { currentCliWriteWait, replayWhilePending, writeExchangeBudget } from './write-wait.ts';
@@ -114,7 +114,7 @@ export async function maybeDelegateLocalAdministration(
   const socketPath = persistenceSocketPathForConfig(config);
   if (!socketPath) throw noDiscoveryPath('The PGLite owner has no persistence discovery path.', holder);
   const capability = await residentOwnerCapabilities(socketPath, config.database_path, holder, options.startupWaitMs);
-  if (!capability.administration?.includes(operation)) throw new OperationError('owner_unavailable',
+  if (!ownerAdministers(capability, operation)) throw new OperationError('owner_unavailable',
     'The running owner does not support this local administration command.', 'Upgrade and restart the owner before administering this brain.');
   const registration = readPersistenceCliRegistration(capability.brain_id);
   const result = await requestPersistenceAdministration(socketPath, {
