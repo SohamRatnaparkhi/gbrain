@@ -234,8 +234,9 @@ export class MinionWorker extends EventEmitter {
 
   /** Cumulative jobs that finished (success or failure). Used in watchdog log lines. */
   private jobsCompleted = 0;
-  /** Idempotency latch for gracefulShutdown — per-job and periodic check sites can race. */
-  private gracefulShutdownFired = false;
+  /** Idempotency latch for gracefulShutdown — per-job and periodic check sites can race.
+   *  Holds the reason so launchJob can abort a claim that committed before the shutdown fired. */
+  private gracefulShutdownReason: string | null = null;
   drainForced = false; // #5062: the shutdown drain expired and running claims were handed back (`jobs work` exits 17)
   /**
    * Set true when the RSS watchdog (not a normal SIGTERM) initiated the
@@ -1068,7 +1069,7 @@ export class MinionWorker extends EventEmitter {
   private checkMemoryLimit(source: 'post-job' | 'periodic'): void {
     if (this.opts.maxRssMb <= 0) return;
     if (!this.running) return;
-    if (this.gracefulShutdownFired) return;
+    if (this.gracefulShutdownReason !== null) return;
 
     let rss = 0;
     try {
@@ -1121,10 +1122,11 @@ export class MinionWorker extends EventEmitter {
    *     waiting out the 30s drain.
    *  3. Main loop exits at the top of the next iteration.
    *  The existing 30s drain in start()'s finally then backstops genuinely
-   *  uninterruptible work. */
+   *  uninterruptible work. A claim whose UPDATE committed but whose result has
+   *  not reached the poll loop is not in `inFlight` yet; launchJob aborts it. */
   private gracefulShutdown(reason: string): void {
-    if (this.gracefulShutdownFired) return;
-    this.gracefulShutdownFired = true;
+    if (this.gracefulShutdownReason !== null) return;
+    this.gracefulShutdownReason = reason;
     if (!this.shutdownAbort.signal.aborted) {
       this.shutdownAbort.abort(new Error(reason));
     }
@@ -1462,6 +1464,7 @@ export class MinionWorker extends EventEmitter {
 
     this.inFlight.set(job.id, { job, lockToken, lockTimer, abort, promise });
     execution.promise = promise;
+    if (this.gracefulShutdownReason !== null && !abort.signal.aborted) abort.abort(new Error(this.gracefulShutdownReason));
   }
 
   /** A handler deferral (JobDeferredError): back to delayed, no attempt counted. */

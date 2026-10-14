@@ -99,9 +99,11 @@ Fields:
   (garbage collection, JIT) and in other processes (a Postgres server, a
   provider). The scale tier's import-rate gate times PGLite imports with it.
   Under a hypervisor whose guest kernel does not subtract steal time (Ubuntu's
-  generic kernels), it also includes vCPU time the host took away while this
-  thread was current, so on an oversubscribed VM it can exceed the thread's
-  real work.
+  generic kernels), it also includes any vCPU stall that landed while this
+  thread was current, whether the host reports it as steal (the vCPU waiting
+  for a CPU) or not (the vCPU asleep in the host, as on a page the host had to
+  back or reclaim first), so on an oversubscribed VM it can exceed the
+  thread's real work.
 - `total` — total items, if known. Omitted when the scan doesn't have a
   total up front (e.g. a streaming iterator).
 - `pct` — `done/total * 100`, one decimal. Omitted when `total` is unknown.

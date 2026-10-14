@@ -12,44 +12,15 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [0.60.225.0] - 2026-10-14
 
-**Choose HydraDB for durable cloud memory, and keep local memory as your fallback.**
-
-You can now connect your brain to HydraDB with `gbrain cloud connect`. Fast retrieval is the default; `gbrain cloud mode thinking` selects thinking mode. Agents receive Markdown context using HydraDB’s SDK formatter, with permitted graph and dated evidence. Natural-language queries,
-search and recall use the cloud even when your brain has no embedding-provider key.
-Pages remain available locally, and turning cloud memory off restores local search.
-Existing gstack context queries use the selected backend.
-
-### How to turn it on
-
-Run `gbrain cloud connect` and review what will be shared. Get an API key from the
-HydraDB dashboard, then follow the prompt. For gstack context loading, set
-`GSTACK_BRAIN_TIMEOUT_MS=10000` in your agent's environment.
-
-| Your choice | What happens |
-| --- | --- |
-| Cloud primary on | HydraDB retrieves and ranks natural-language page searches. |
-| Cloud primary off | Local search resumes; pages still sync to HydraDB. |
-| Disconnect | Cloud sync stops; local memory keeps working. |
-
-Private pages and private fact rows stay local. Detected secrets are redacted from
-outgoing text and titles. Structured record reads, explicit keyword enumeration,
-image similarity and symbol walks keep their existing local contracts.
+**A worker whose memory watchdog fires while a claim is mid-flight now aborts that job too.** `gracefulShutdown` aborted only the jobs already registered in `inFlight`; a claim whose `UPDATE … RETURNING` had committed but whose result had not reached the poll loop launched afterwards with a live per-job signal, ran unaborted through the 30 s drain, and ended on the SIGTERM path (`worker_shutdown` hand-back, or the handler's own text for an `UnrecoverableError`) instead of `aborted: watchdog`. This was the `worker-shutdown-error-matrix` CI flake: the test observed `active` on a second Postgres connection and fired the watchdog inside that round trip.
 
 ### Itemized changes
 
-- Add opt-in cloud connection, status, indexed backfill, write-through syncing and disconnect commands.
-- Route keyless recall and both hybrid search entry points through the selected cloud backend.
-- Preserve source, type, date, slug and pagination filters without running local relevance ranking.
-- Verify per-item ingestion, indexing and deletion outcomes before advancing mirror cursors.
-- Keep page identities distinct across sources and retry interrupted batches.
-- Reconcile archived/restored sources, expand schema type aliases in cloud searches, serialize PostgreSQL uploads across processes, and preserve shared credentials when one brain disconnects.
-- Add an optional staging endpoint and a synthetic live smoke, including gstack CLI context loading.
-
-### To take advantage of v0.60.225.0
-
-Upgrade GBrain, then run `gbrain cloud connect` if you want HydraDB memory.
-Cloud memory remains off until you explicitly connect. See
-[cloud memory](docs/guides/cloud-memory.md) for setup and off switches.
+- `src/core/minions/worker.ts` (+3 lines, ceiling 1777): `gracefulShutdown` records its reason; `launchJob` aborts a job it registers after the shutdown fired with that reason, so the job takes the same abort path as one that was already in flight (attempt burned, `delayed`; `UnrecoverableError` dead).
+- `test/worker-shutdown-error-matrix.test.ts`: a forced case holds the committed claim's result until the watchdog has fired (both engines; fails on the previous worker, passes now).
+- Docs: `docs/architecture/key-files/core-minions-2.md` worker entry.
+- `test/progress.test.ts` cpu_ms flake, second mechanism: run 38588222510 billed 105 ms to the thread inside its 200 ms wait with the VM-wide steal counter at 0. KVM counts only runnable waiting as steal; a vCPU asleep in the host (a guest page the host still had to back, under host memory throttling) advances the guest clock while the guest thread is current and is billed to that thread with no steal recorded. Reproduced on a nested-KVM guest (virtio-balloon cycle to leave guest pages host-unbacked, host `memory.high` on the VM): master's test failed 4/10 runs with the CI signature, `steal 0 ms` included. The window check now also treats CPU charged to the thread while it was blocked in the futex (≥ 10 ms; 0.2–2.2 ms across 500 clean windows on three hosts) as a stall and re-measures; the bound is unchanged, and a run with no clean window in 5 attempts fails with each window's charge, wait overrun and steal. Doc sentence on `cpu_ms` widened accordingly.
+- `test/e2e/supervisor-stop-drain-5062.test.ts` flake: the test read each barrier pid file as soon as it existed, but `echo $$ > f` creates the file before the pid lands in it, so an empty read gave pid 0 and `process.kill(0, 0)` (this test's own process group) reported it alive after the drain. The reader now waits for a parsed pid, `alive` refuses a non-positive pid, and the barrier job forces the window (create, 300 ms, write) on every run. Root cause reported from the Cat 40 Hard wave (#6668).
 
 ## [0.60.224.0] - 2026-10-14
 
