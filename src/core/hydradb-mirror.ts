@@ -74,9 +74,9 @@ async function ingest(conn: HydraConnection, pages: Array<{ page: Page; text: st
   await ingestHydra(conn, form, pages.map(({ page }) => hydraDocId(page.source_id, page.slug)), signal);
 }
 
-async function remove(conn: HydraConnection, refs: PageRef[]): Promise<void> {
+async function remove(conn: HydraConnection, refs: PageRef[], signal?: AbortSignal): Promise<void> {
   if (!refs.length) return;
-  await deleteHydra(conn, refs.map((r) => hydraDocId(r.source_id, r.slug)));
+  await deleteHydra(conn, refs.map((r) => hydraDocId(r.source_id, r.slug)), signal);
 }
 
 /** Upload each page's projection, or remove the page from the cloud when it projects to nothing. */
@@ -94,16 +94,43 @@ async function sync(engine: BrainEngine, conn: HydraConnection, pages: Page[], r
     else removals.push(page);
   }
   await ingest(conn, upserts, signal);
-  await remove(conn, removals);
+  await remove(conn, removals, signal);
   report.upserted += upserts.length;
   report.removed += removals.length;
 }
 
 interface MirrorCursor { updatedAt: string; slug: string; sourceId: string }
 const locks = new WeakMap<BrainEngine, Promise<unknown>>();
-/** Serialize background writes and catch-up so older projections cannot overtake newer ones. */
-export function withCloudLock<T>(engine: BrainEngine, work: () => Promise<T>): Promise<T> {
-  const run = (locks.get(engine) ?? Promise.resolve()).catch(() => undefined).then(work);
+/** Serialize snapshots through indexed completion across engines and PostgreSQL processes. */
+export function withCloudLock<T>(engine: BrainEngine, work: (signal?: AbortSignal) => Promise<T>): Promise<T> {
+  const run = (locks.get(engine) ?? Promise.resolve()).catch(() => undefined).then(async () => {
+    if (engine.kind !== 'postgres') return work(); // PGLite owns its database exclusively.
+    return engine.withReservedConnection(async conn => {
+      // A transaction pins the reserved backend even behind transaction-mode PgBouncer.
+      // Keep mirror reads/cursor writes outside this transaction so completed batches persist.
+      await conn.executeRaw('BEGIN');
+      const controller = new AbortController();
+      let heartbeat: Promise<unknown> = Promise.resolve();
+      let timer: ReturnType<typeof setInterval> | undefined;
+      try {
+        await conn.executeRaw("SET LOCAL idle_in_transaction_session_timeout = '5min'");
+        await conn.executeRaw("SET LOCAL lock_timeout = '120s'");
+        await conn.executeRaw("SELECT pg_advisory_xact_lock(hashtextextended('gbrain:hydradb:mirror', 0))");
+        // Long backfills must keep the pinned transaction alive. Losing it cancels transfers.
+        timer = setInterval(() => {
+          heartbeat = heartbeat.then(() => conn.executeRaw('SELECT 1')).catch(error => controller.abort(error));
+        }, 30_000);
+        timer.unref?.();
+        const result = await work(controller.signal);
+        controller.signal.throwIfAborted();
+        return result;
+      } finally {
+        clearInterval(timer);
+        await heartbeat;
+        await conn.executeRaw('ROLLBACK'); // releases the lock on success and failure
+      }
+    });
+  });
   locks.set(engine, run);
   void run.finally(() => { if (locks.get(engine) === run) locks.delete(engine); }).catch(() => undefined);
   return run;
@@ -111,7 +138,7 @@ export function withCloudLock<T>(engine: BrainEngine, work: () => Promise<T>): P
 
 export function mirrorBrain(engine: BrainEngine, conn: HydraConnection,
   opts: { full?: boolean; progress?: ProgressReporter; signal?: AbortSignal } = {}): Promise<MirrorReport> {
-  return withCloudLock(engine, () => mirror(engine, conn, opts));
+  return withCloudLock(engine, signal => mirror(engine, conn, { ...opts, signal: opts.signal && signal ? AbortSignal.any([opts.signal, signal]) : opts.signal ?? signal }));
 }
 
 async function mirror(engine: BrainEngine, conn: HydraConnection,
@@ -119,12 +146,14 @@ async function mirror(engine: BrainEngine, conn: HydraConnection,
   const report: MirrorReport = { upserted: 0, removed: 0, skipped: 0 };
   const horizon = opts.full ? toMicroIso(new Date().toISOString()) : horizonIso();
 
+  await reconcileSources(engine, conn, report, opts.signal);
+
   const deletedSince = await engine.getConfig(HYDRADB_CONFIG.deletedSince);
   if (deletedSince) {
     const gone = await engine.executeRaw<PageRef>(
       `SELECT source_id, slug FROM pages WHERE deleted_at > $1::text::timestamptz AND deleted_at <= $2::text::timestamptz`,
       [deletedSince, horizon]);
-    for (let i = 0; i < gone.length; i += BATCH) await remove(conn, gone.slice(i, i + BATCH));
+    for (let i = 0; i < gone.length; i += BATCH) await remove(conn, gone.slice(i, i + BATCH), opts.signal);
     report.removed += gone.length;
   }
   await engine.setConfig(HYDRADB_CONFIG.deletedSince, horizon);
@@ -152,7 +181,7 @@ async function mirror(engine: BrainEngine, conn: HydraConnection,
       if (page) pages.push(page); else gone.push(ref);
     }
     await sync(engine, conn, pages, report, opts.signal);
-    await remove(conn, gone);
+    await remove(conn, gone, opts.signal);
     report.removed += gone.length;
     const last = refs[refs.length - 1]!;
     cursor = { updatedAt: last.at, slug: last.slug, sourceId: last.source_id };
@@ -163,6 +192,34 @@ async function mirror(engine: BrainEngine, conn: HydraConnection,
   opts.progress?.finish(`${report.upserted} mirrored, ${report.removed} removed`);
   await engine.setConfig(HYDRADB_CONFIG.lastPushAt, new Date().toISOString());
   return report;
+}
+
+/** Source visibility changes do not touch pages.updated_at; reconcile them independently. */
+async function reconcileSources(engine: BrainEngine, conn: HydraConnection, report: MirrorReport, signal?: AbortSignal): Promise<void> {
+  const sources = await engine.executeRaw<{ id: string; archived: boolean }>('SELECT id, archived FROM sources');
+  const saved = await engine.getConfig(HYDRADB_CONFIG.sourceStates);
+  const previous: Record<string, boolean> = saved ? JSON.parse(saved) : {};
+  for (const source of sources) {
+    if (source.archived ? previous[source.id] === true : previous[source.id] !== true) continue;
+    let slug: string | null = null;
+    for (;;) {
+      signal?.throwIfAborted();
+      const refs: PageRef[] = await engine.executeRaw<PageRef>(
+        `SELECT source_id, slug FROM pages WHERE source_id = $1 AND deleted_at IS NULL
+         ${slug === null ? '' : 'AND slug > $2'} ORDER BY slug LIMIT ${BATCH}`,
+        slug === null ? [source.id] : [source.id, slug]);
+      if (!refs.length) break;
+      if (source.archived) { await remove(conn, refs, signal); report.removed += refs.length; }
+      else {
+        const pages = await Promise.all(refs.map(ref => engine.getPage(ref.slug, { sourceId: ref.source_id })));
+        await sync(engine, conn, pages.filter((p): p is Page => p !== null), report, signal);
+      }
+      slug = refs[refs.length - 1]!.slug;
+      if (refs.length < BATCH) break;
+    }
+  }
+  // Failed removals/restores leave the previous snapshot intact for retry.
+  await engine.setConfig(HYDRADB_CONFIG.sourceStates, JSON.stringify(Object.fromEntries(sources.map(s => [s.id, s.archived]))));
 }
 
 /**
@@ -195,18 +252,19 @@ function flushCloudPush(engine: BrainEngine): void {
   if (!entry) return;
   queued.delete(engine);
   clearTimeout(entry.timer);
-  const run = withCloudLock(engine, async () => {
+  const run = withCloudLock(engine, async signal => {
     const conn = await resolveHydraConnection(engine);
     if (!conn) return;
     const pages: Page[] = [];
     const gone: PageRef[] = [];
     for (const ref of entry.refs.values()) {
-      const page = await engine.getPage(ref.slug, { sourceId: ref.source_id });
+      const [source] = await engine.executeRaw<{ archived: boolean }>('SELECT archived FROM sources WHERE id = $1', [ref.source_id]);
+      const page = source && !source.archived ? await engine.getPage(ref.slug, { sourceId: ref.source_id }) : null;
       if (page) pages.push(page);
       else gone.push(ref);
     }
-    await sync(engine, conn, pages, { upserted: 0, removed: 0, skipped: 0 });
-    await remove(conn, gone);
+    await sync(engine, conn, pages, { upserted: 0, removed: 0, skipped: 0 }, signal);
+    await remove(conn, gone, signal);
   }).catch(() => undefined);
   pushing.add(run);
   void run.finally(() => pushing.delete(run));

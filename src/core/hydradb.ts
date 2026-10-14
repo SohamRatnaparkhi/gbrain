@@ -30,6 +30,8 @@ export const HYDRADB_CONFIG = {
   pagesCursor: 'hydradb.pages_cursor',
   /** Soft-deletes after this instant are not yet removed from the cloud. */
   deletedSince: 'hydradb.deleted_since',
+  /** Last successfully reconciled source archive states. */
+  sourceStates: 'hydradb.source_states',
   lastPushAt: 'hydradb.last_push_at',
 } as const;
 
@@ -57,7 +59,7 @@ export class HydraDBError extends Error {
 
 /** One API call: bearer auth, API-Version 2, the `{ data, error }` envelope unwrapped; non-2xx throws. */
 export async function hydraRequest<T>(conn: Pick<HydraConnection, 'apiKey' | 'baseUrl'>, method: string, path: string,
-  opts: { query?: Record<string, string>; json?: unknown; form?: FormData; timeoutMs?: number } = {}): Promise<T> {
+  opts: { query?: Record<string, string>; json?: unknown; form?: FormData; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<T> {
   const url = new URL(path, hydraBaseUrl(conn.baseUrl));
   for (const [k, v] of Object.entries(opts.query ?? {})) url.searchParams.set(k, v);
   const headers: Record<string, string> = { authorization: `Bearer ${conn.apiKey}`, 'api-version': '2' };
@@ -66,7 +68,7 @@ export async function hydraRequest<T>(conn: Pick<HydraConnection, 'apiKey' | 'ba
     method,
     headers,
     body: opts.form ?? (opts.json !== undefined ? JSON.stringify(opts.json) : undefined),
-    signal: AbortSignal.timeout(opts.timeoutMs ?? 30_000),
+    signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(opts.timeoutMs ?? 30_000)]) : AbortSignal.timeout(opts.timeoutMs ?? 30_000),
   });
   const envelope = await res.json().catch(() => null) as { data?: T; error?: { message?: string } | string } | null;
   if (!res.ok) {

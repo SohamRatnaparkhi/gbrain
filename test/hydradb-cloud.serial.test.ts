@@ -16,15 +16,19 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { handleToolCall } from '../src/mcp/server.ts';
 import { dispatchToolCall } from '../src/mcp/dispatch.ts';
 import { HYDRADB_API_KEY_ENV, HYDRADB_CONFIG, hydraDocId, resolveHydraConnection, saveHydraApiKey } from '../src/core/hydradb.ts';
+import { hydraPrimarySearch } from '../src/core/search/hydra-primary.ts';
 import { mirrorBrain } from '../src/core/hydradb-mirror.ts';
 import { runCloud } from '../src/commands/cloud.ts';
 import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
 import { drainAllBackgroundWorkForCliExit } from '../src/core/background-work.ts';
 import type { SearchResult } from '../src/core/types.ts';
 import { newSource, page, putPage } from './helpers/pinned-questions-fixture.ts';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { withEnv } from './helpers/with-env.ts';
 
-interface CloudDoc { id: string; title: string; markdown: string; meta: { gbrain_source: string; gbrain_slug: string } }
+interface CloudDoc { id: string; title: string; markdown: string; meta: { gbrain_source: string; gbrain_slug: string; gbrain_type?: string } }
 const cloud = {
   database: null as string | null,
   docs: new Map<string, CloudDoc>(),
@@ -73,7 +77,8 @@ async function fakeHydra(input: string | URL | Request, init?: RequestInit): Pro
       const body = json();
       cloud.queries.push(body);
       const allowed: string[] | undefined = body.metadata_filters?.additional_metadata?.gbrain_source;
-      const chunks = [...cloud.docs.values()].filter(d => !allowed || allowed.includes(d.meta.gbrain_source))
+      const types: string[] | undefined = body.metadata_filters?.additional_metadata?.gbrain_type;
+      const chunks = [...cloud.docs.values()].filter(d => (!allowed || allowed.includes(d.meta.gbrain_source)) && (!types || types.includes(d.meta.gbrain_type ?? '')))
         .map(d => ({ id: d.id, source_title: d.title, chunk_content: d.markdown, additional_metadata: d.meta }));
       return reply({ chunks });
     }
@@ -291,3 +296,73 @@ describe('gbrain cloud', () => {
     });
   });
 });
+
+
+test('archiving and restoring an already mirrored source reconciles unchanged pages', async () => {
+  await mirrorBrain(engine, conn);
+  const cursor = await engine.getConfig(HYDRADB_CONFIG.pagesCursor);
+  try {
+    await engine.executeRaw('UPDATE sources SET archived = true WHERE id = $1', [sourceId]);
+    cloud.fail = true;
+    await expect(mirrorBrain(engine, conn)).rejects.toThrow('HydraDB 503');
+    cloud.fail = false;
+    await mirrorBrain(engine, conn);
+    expect(cloud.docs.has(hydraDocId(sourceId, 'notes/forge-offsite'))).toBe(false);
+    expect(cloud.docs.has(hydraDocId(otherSource, 'notes/elsewhere'))).toBe(true);
+    expect(await engine.getConfig(HYDRADB_CONFIG.pagesCursor)).toBe(cursor);
+    await engine.executeRaw('UPDATE sources SET archived = false WHERE id = $1', [sourceId]);
+    await mirrorBrain(engine, conn);
+    expect(cloud.docs.get(hydraDocId(sourceId, 'notes/forge-offsite'))?.markdown).toContain('Santa Fe');
+  } finally {
+    cloud.fail = false;
+    await engine.executeRaw('UPDATE sources SET archived = false WHERE id = $1', [sourceId]);
+  }
+});
+
+test('cloud type aliases admit both held and remote-only initiative pages', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'hydra-alias-'));
+  const dir = join(home, '.gbrain', 'schema-packs', 'hydra-alias-test');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'pack.json'), JSON.stringify({ api_version: 'gbrain-schema-pack-v1', name: 'hydra-alias-test',
+    version: '1.0.0', extends: 'gbrain-base', page_types: [{ name: 'initiative', primitive: 'entity', aliases: ['company'], path_prefixes: ['initiatives/'] }] }));
+  await withEnv({ GBRAIN_HOME: home, GBRAIN_SCHEMA_PACK: undefined }, async () => {
+    await engine.setConfig(`schema_pack.source.${sourceId}`, 'hydra-alias-test');
+    try {
+      await putPage(engine, sourceId, 'initiatives/alias-held', page('initiative', 'Held initiative', 'Forge initiative in Santa Fe.'));
+      await connectAll();
+      await mirrorBrain(engine, conn, { full: true });
+      cloud.docs.set('remote-alias', { id: 'remote-alias', title: 'Remote initiative', markdown: 'Remote Forge initiative.',
+        meta: { gbrain_source: sourceId, gbrain_slug: 'initiatives/alias-remote', gbrain_type: 'initiative' } });
+      for (const filters of [{ type: 'company' }, { types: ['company'] }]) {
+        const rows = 'type' in filters ? (await hydraPrimarySearch(engine, Q, { ...filters, sourceId }, 8))! : await query(filters);
+        expect(rows.some(row => row.slug === 'initiatives/alias-held')).toBe(true);
+        expect(rows.some(row => row.result_type === 'cloud' && row.chunk_text.includes('Remote Forge'))).toBe(true);
+        expect((cloud.queries.at(-1) as any).metadata_filters.additional_metadata.gbrain_type).toEqual(['company', 'initiative']);
+      }
+      cloud.queries = [];
+      expect(await hydraPrimarySearch(engine, Q, { sourceId, type: 'company', types: ['note'] }, 8)).toEqual([]);
+      expect(cloud.queries).toHaveLength(0);
+    } finally { await engine.unsetConfig(`schema_pack.source.${sourceId}`); }
+  });
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('disconnecting one brain preserves a shared vault key for another brain', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'hydra-shared-vault-'));
+  const other = new PGLiteEngine();
+  await other.connect({}); await other.initSchema();
+  try {
+    await withEnv({ GBRAIN_HOME: home, [HYDRADB_API_KEY_ENV]: undefined }, async () => {
+      const key = 'hk_shared.synthetic';
+      const id = await saveHydraApiKey(key);
+      expect(await saveHydraApiKey(key)).toBe(id);
+      for (const brain of [engine, other]) {
+        await brain.setConfig(HYDRADB_CONFIG.database, 'gbrain');
+        await brain.setConfig(HYDRADB_CONFIG.credentialId, id);
+      }
+      await runCloud(engine, ['disconnect']);
+      expect(await resolveHydraConnection(engine)).toBeNull();
+      expect(await resolveHydraConnection(other)).toEqual({ database: 'gbrain', apiKey: key });
+    });
+  } finally { await other.disconnect(); rmSync(home, { recursive: true, force: true }); }
+}, 120_000);

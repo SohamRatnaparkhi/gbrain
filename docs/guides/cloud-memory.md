@@ -49,11 +49,16 @@ A page that turns private, empties out, or is deleted is removed from the cloud.
 
 `gbrain cloud push` mirrors now; `--full` re-sends every page. The mirror checks
 every upload and deletion result and waits for indexing before advancing its
-cursor. Failed or unfinished batches remain retryable;
+cursor. Archiving a source removes its unchanged pages too; restoring it sends
+those pages again. PostgreSQL processes share a database lock, so an older
+upload cannot overtake a newer sync. Failed or unfinished batches remain retryable;
 `last_push_at` describes a completed mirror, not merely an accepted upload.
 
 Bound: a page soft-deleted and then purged while every mirror run failed stays in
 the cloud until `gbrain cloud disconnect --purge-cloud`.
+
+Disconnect clears this brain's credential reference. The shared machine vault
+entry remains available to other connected brains.
 
 ## How search uses it
 
@@ -88,7 +93,7 @@ and a page written seconds ago may not be found yet.
 
 ```bash
 gbrain cloud primary off                  # search locally; pages keep syncing
-gbrain cloud disconnect                   # stop everything; the cloud copy is kept
+gbrain cloud disconnect                   # stop this brain; the cloud copy is kept
 gbrain cloud disconnect --purge-cloud     # also delete the HydraDB database
 ```
 

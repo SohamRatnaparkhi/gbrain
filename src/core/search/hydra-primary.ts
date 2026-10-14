@@ -21,6 +21,7 @@ import { pageKey, pageReadability, pageReadFilter } from './read-policy-sql.ts';
 import { buildVisibilityClause } from './sql-ranking.ts';
 import type { HybridSearchOpts } from './hybrid.ts';
 import { UNTIMED } from './stage-timings.ts';
+import { expandEngineTypeFilters } from '../schema-pack/query-types.ts';
 import { hydraFilter } from './hydra-filters.ts';
 import { enforceTokenBudget } from './token-budget.ts';
 import type { HybridSearchMeta } from '../types.ts';
@@ -62,6 +63,12 @@ export async function hydraPrimarySearch(engine: BrainEngine, query: string, opt
   if (!await hydraPrimaryEnabled(engine)) return null;
   const conn = await resolveHydraConnection(engine);
   if (!conn) return null;
+  const types = await expandEngineTypeFilters(engine, opts ?? {});
+  opts = { ...opts, ...types };
+  if (opts.types?.length === 0) {
+    opts.onMeta?.({ backend: 'hydradb', vector_enabled: false, detail_resolved: opts.detail ?? null, expansion_applied: false, degraded: [], retrieved_count: 0 });
+    return [];
+  }
   return (opts?._timings ?? UNTIMED).stage('hydradb', () => rankFromHydra(engine, conn, query, opts, limit));
 }
 

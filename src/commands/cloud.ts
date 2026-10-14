@@ -25,7 +25,6 @@ import { isConfigTruthy } from '../core/config.ts';
 import { isInteractive, promptLineStderr, promptYesNo } from '../core/interaction.ts';
 import { createProgress } from '../core/progress.ts';
 import { readStdinPayload } from '../core/stdin-read.ts';
-import { openVault } from '../core/creds/vault.ts';
 import {
   DEFAULT_HYDRADB_DATABASE, HYDRADB_API_KEY_ENV, HYDRADB_CONFIG, HydraDBError,
   apiKeyPrefix, hydraRequest, resolveHydraConnection, saveHydraApiKey, type HydraConnection,
@@ -218,8 +217,7 @@ async function disconnect(engine: BrainEngine, args: string[]): Promise<void> {
     await hydraRequest(conn, 'DELETE', '/databases', { query: { database: conn.database } });
     console.log(`Deleted HydraDB database "${conn.database}".`);
   }
-  const credentialId = await engine.getConfig(HYDRADB_CONFIG.credentialId);
-  if (credentialId) await openVault().delete(credentialId);
+  // Vault entries are shared by brains on this machine; clear only this brain's reference.
   for (const key of Object.values(HYDRADB_CONFIG)) await engine.unsetConfig(key);
   console.log('Cloud memory is off. This brain is unchanged and keeps working locally.');
 }

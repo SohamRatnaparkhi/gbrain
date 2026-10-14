@@ -42,6 +42,7 @@ image similarity and symbol walks keep their existing local contracts.
 - Preserve source, type, date, slug and pagination filters without running local relevance ranking.
 - Verify per-item ingestion, indexing and deletion outcomes before advancing mirror cursors.
 - Keep page identities distinct across sources and retry interrupted batches.
+- Reconcile archived/restored sources, expand schema type aliases in cloud searches, serialize PostgreSQL uploads across processes, and preserve shared credentials when one brain disconnects.
 - Add an optional staging endpoint and a synthetic live smoke, including gstack CLI context loading.
 
 ### To take advantage of v0.60.222.0

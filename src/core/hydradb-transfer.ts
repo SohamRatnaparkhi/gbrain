@@ -7,7 +7,7 @@ const INDEX_TIMEOUT_MS = 120_000;
 
 export async function ingestHydra(conn: HydraConnection, form: FormData, ids: string[], signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();
-  const receipt = await hydraRequest<IngestReceipt>(conn, 'POST', '/context/ingest', { form });
+  const receipt = await hydraRequest<IngestReceipt>(conn, 'POST', '/context/ingest', { form, signal });
   if (!receipt?.results || receipt.failed_count || ids.some(id => !receipt.results!.some(r => r.id === id && !r.error && ['queued', 'processing', 'completed'].includes(r.status ?? '')))) {
     throw new Error('HydraDB did not accept every page; the mirror will retry this batch.');
   }
@@ -15,7 +15,7 @@ export async function ingestHydra(conn: HydraConnection, form: FormData, ids: st
   while (true) {
     signal?.throwIfAborted();
     const data = await hydraRequest<{ statuses?: Array<{ id: string; indexing_status: string }> }>(conn, 'GET', '/context/status',
-      { query: { database: conn.database, ids: ids.join(',') }, timeoutMs: Math.min(30_000, Math.max(1, deadline - Date.now())) });
+      { signal, query: { database: conn.database, ids: ids.join(',') }, timeoutMs: Math.min(30_000, Math.max(1, deadline - Date.now())) });
     if (data?.statuses?.some(s => s.indexing_status === 'failed')) throw new Error('HydraDB indexing failed; the mirror will retry this batch.');
     if (ids.every(id => data?.statuses?.some(s => s.id === id && s.indexing_status === 'completed'))) return;
     if (Date.now() >= deadline) throw new Error('HydraDB indexing is still pending; the mirror will retry this batch.');
@@ -23,9 +23,9 @@ export async function ingestHydra(conn: HydraConnection, form: FormData, ids: st
   }
 }
 
-export async function deleteHydra(conn: HydraConnection, ids: string[]): Promise<void> {
+export async function deleteHydra(conn: HydraConnection, ids: string[], signal?: AbortSignal): Promise<void> {
   const data = await hydraRequest<{ results?: Array<{ id: string; deleted: boolean; error?: string }> }>(conn, 'DELETE', '/context',
-    { json: { database: conn.database, type: 'knowledge', ids } });
+    { signal, json: { database: conn.database, type: 'knowledge', ids } });
   // An absent document is already removed. Every other per-id failure must remain retryable.
   if (!data?.results || ids.some(id => !data.results!.some(r => r.id === id && (r.deleted || /not found|does not exist/i.test(r.error ?? ''))))) {
     throw new Error('HydraDB did not remove every page; the mirror will retry these deletions.');
