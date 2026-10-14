@@ -54,8 +54,8 @@ The harness compares four conditions through the shipped MCP `query` operation:
 | Most recent 30% of sessions, rounded up per question | HydraDB fast | All sessions |
 
 Local hybrid has complete `openai/text-embedding-3-small` vectors, plus GBrain's
-keyword fusion. Query expansion, semantic cache and autocut are disabled for
-both backends. Gold session identifiers are hashed in page slugs and titles;
+keyword fusion. GBrain query expansion, semantic cache and autocut are disabled.
+HydraDB's internal caching is not controlled. Gold session identifiers are hashed in page slugs and titles;
 only the scorer knows the inverse mapping. Sources isolate each question's
 haystack. Backend receipts disclose cloud fallbacks. Three repetitions balance
 backend order; retrieval quality uses the first repetition and latency includes
@@ -64,7 +64,7 @@ latency. The complete public conversation corpus is uploaded only to a unique
 disposable database, which is deleted in `finally`. `--work-dir` retains local
 benchmark data and vectors for resumable reruns and checks corpus identity.
 
-Metrics are any/all gold-session hit rate at the top ten returned chunk rows,
+Metrics are any/all gold-session hit rate among up to ten returned query results,
 gold-session recall, and end-to-end query p50/p95 latency. The reduced-local
 comparison measures access to older cloud memory; it is not an equal-corpus
 retrieval quality comparison. This small development pilot does not measure
@@ -73,3 +73,11 @@ model and the full held-out split are needed before making those claims.
 
 Keep raw question/session/output rows outside the repository. Publish only
 aggregate metrics, sample size, dataset hash, settings and fallback counts.
+
+Cloud indexing is asynchronous and may take much longer than retrieval. The
+runner waits for verified completion (up to 30 minutes per upload batch), logs
+aggregate indexing states and error codes, and keeps the disposable database
+identifier in `--work-dir/live-cloud.json` during the run for diagnosis. The
+file and cloud database are removed after completion or failure.
+
+Measured pilot: [six-category retrieval comparison](results/longmemeval-pilot-2026-10-14.md).

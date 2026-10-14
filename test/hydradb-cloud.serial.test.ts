@@ -489,17 +489,18 @@ test('cloud query, search and recall honor page, section and window delivery wit
   cloud.responseExtras = { llm_prompt: 'MATCH_ONLY_PROMPT', chunks: [{ id, chunk_uuid: 'expanded-chunk', source_title: doc.title,
     chunk_content: pieces[1], additional_metadata: doc.meta }], graph_context: { query_paths: [{ source_chunk_ids: ['expanded-chunk'],
     combined_context: 'AUTHORIZED_EXPANDED_GRAPH', triplets: [] }], chunk_relations: [], chunk_id_to_group_ids: {} } };
-  for (const op of ['query', 'search', 'recall']) {
+  for (const remote of [false, true]) for (const op of ['query', 'search', 'recall']) {
     for (const unit of ['page', 'section', 'window']) {
       const result = await dispatchToolCall(engine, op, { query: Q, source_id: sourceId, limit: 1, expand: false,
-        return_unit: unit, return_window: 1, fields: 'full', snippet_chars: 0 },
-        { transport: 'stdio', remote: false, sourceId, config: { engine: engine.kind } as never, logger: { info() {}, warn() {}, error() {} } });
+        return_unit: unit, return_window: 1, ...(remote ? {} : { fields: 'full' }), snippet_chars: 0 },
+        { transport: 'stdio', remote, sourceId, ...(remote ? { auth: { token: 't', clientId: 'lean-probe', scopes: ['read'], sourceId, allowedSources: [sourceId] } } : {}), config: { engine: engine.kind } as never, logger: { info() {}, warn() {}, error() {} } });
       expect(result.isError).not.toBe(true);
       const structured = unpackToolResult<any>(result);
       const rows = op === 'recall' ? structured.results : structured;
       expect(rows).toHaveLength(1);
       const delivered = rows[0], text = delivered.chunk_text ?? delivered.chunk;
-      expect(delivered.delivered?.unit).toBe(unit);
+      if (!remote || op === 'recall') expect(delivered.delivered?.unit).toBe(unit);
+      else expect(delivered.delivered).toBeUndefined();
       expect(text).toContain('SECTION_DETAIL');
       expect(result.content[0]!.text).toContain('SECTION_DETAIL');
       expect(result.content[0]!.text).toContain('AUTHORIZED_EXPANDED_GRAPH');
@@ -508,7 +509,7 @@ test('cloud query, search and recall honor page, section and window delivery wit
       else expect(text).not.toContain('PAGE_ONLY_DETAIL');
       if (unit === 'window') expect(text).toContain('WINDOW_EARLIER');
       if (unit === 'section') expect(text).not.toContain('WINDOW_EARLIER');
-      for (const span of delivered.delivered.match_spans) expect(text.slice(span.start, span.end)).toBe(pieces[1]);
+      for (const span of delivered.delivered?.match_spans ?? []) expect(text.slice(span.start, span.end)).toBe(pieces[1]);
     }
   }
 });

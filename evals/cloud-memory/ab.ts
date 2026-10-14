@@ -14,16 +14,20 @@ if (!datasetPath || !idsPath || !out || !process.env.HYDRA_DB_API_KEY || !proces
 }
 const k = Number(arg('--k') ?? 10), share = Number(arg('--local-share') ?? 0.3), repeats = Number(arg('--repeats') ?? 3);
 if (!Number.isInteger(k) || k < 1 || !Number.isInteger(repeats) || repeats < 1 || share <= 0 || share >= 1) throw new Error('Invalid k, repeats or local-share.');
-const bytes = readFileSync(datasetPath), wanted = readFileSync(idsPath, 'utf8').trim().split(/\s+/);
+let bytes = readFileSync(datasetPath);
+const datasetHash = createHash('sha256').update(bytes).digest('hex');
+const wanted = readFileSync(idsPath, 'utf8').trim().split(/\s+/);
 const dataset = JSON.parse(bytes.toString()) as LongMemEvalQuestion[];
 const questions = wanted.map(id => dataset.find(q => q.question_id === id));
 if (new Set(wanted).size !== wanted.length || questions.some(q => !q)) throw new Error('Every unique selected id must exist in the dataset.');
-const selected = questions as LongMemEvalQuestion[];
+// Retain only the selected complete haystacks, not the 277 MB dataset and its parsed copy.
+const selected = JSON.parse(JSON.stringify(questions)) as LongMemEvalQuestion[];
+dataset.length = 0; questions.length = 0; bytes = Buffer.alloc(0);
 const workspace = arg('--work-dir');
 if (workspace) {
   mkdirSync(workspace, { recursive: true });
   const manifest = join(workspace, 'manifest.json');
-  const identity = JSON.stringify({ dataset_sha256: createHash('sha256').update(bytes).digest('hex'), ids: wanted, share, embedding_model: 'openrouter:openai/text-embedding-3-small' });
+  const identity = JSON.stringify({ dataset_sha256: datasetHash, ids: wanted, share, embedding_model: 'openrouter:openai/text-embedding-3-small' });
   if (existsSync(manifest) && readFileSync(manifest, 'utf8') !== identity) throw new Error('Existing work-dir contains a different benchmark corpus or embedding configuration.');
   writeFileSync(manifest, identity);
 }
@@ -86,11 +90,19 @@ try {
     if (Date.now() > deadline) throw new Error('HydraDB database provisioning timed out.');
     await Bun.sleep(1000);
   }
+  if (workspace) writeFileSync(join(workspace, 'live-cloud.json'), JSON.stringify({ database: conn.database, base_url: conn.baseUrl, created_at: new Date().toISOString() }));
   log(`Mirroring ${pages} pages into a disposable database; waiting for indexed completion.`);
-  const originalFetch = globalThis.fetch;
+  const originalFetch = globalThis.fetch; let statusPolls = 0;
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const at = performance.now(), url = new URL(String(input));
-    try { const response = await originalFetch(input as string, init); if (url.hostname.endsWith('.hydradb.com')) log(`${init?.method ?? 'GET'} ${url.pathname}: ${response.status}, ${Math.round(performance.now() - at)}ms`); return response; }
+    try { const response = await originalFetch(input as string, init);
+      if (url.pathname === '/context/status' && ++statusPolls % 10 === 0) {
+        const body = await response.clone().json() as { data?: { statuses?: Array<{ indexing_status: string; error_code?: string }> } };
+        const statuses = body.data?.statuses ?? [];
+        log('Index states: ' + JSON.stringify(Object.fromEntries([...new Set(statuses.map(s => s.indexing_status))].map(state => [state, statuses.filter(s => s.indexing_status === state).length]))));
+        const codes = statuses.map(s => s.error_code).filter(c => typeof c === 'string' && /^[A-Z][A-Z0-9_-]{0,31}$/.test(c)); if (codes.length) log('Index error codes: ' + JSON.stringify([...new Set(codes)]));
+      }
+      if (url.hostname.endsWith('.hydradb.com')) log(`${init?.method ?? 'GET'} ${url.pathname}: ${response.status}, ${Math.round(performance.now() - at)}ms`); return response; }
     catch (error) { if (url.hostname.endsWith('.hydradb.com')) log(`${init?.method ?? 'GET'} ${url.pathname} failed after ${Math.round(performance.now() - at)}ms`); throw error; }
   }) as typeof fetch;
   const mirrored = await mirrorBrain(a, conn, { full: true, progress: { start() {}, tick(n: number) { log(`Indexed another ${n} pages.`); }, finish() {} } as never });
@@ -145,7 +157,7 @@ try {
       p50_ms: times[Math.floor(times.length / 2)], p95_ms: times[Math.min(times.length - 1, Math.floor(times.length * 0.95))],
       cloud_fallbacks: rs.filter(r => condition.includes('HydraDB') && r.backend !== 'hydradb').length };
   });
-  writeFileSync(out, JSON.stringify({ dataset: 'LongMemEval_s cleaned', dataset_sha256: createHash('sha256').update(bytes).digest('hex'),
+  writeFileSync(out, JSON.stringify({ dataset: 'LongMemEval_s cleaned', dataset_sha256: datasetHash,
     selected_ids: wanted, question_types: Object.fromEntries([...new Set(selected.map(q => q.question_type))].map(type => [type, selected.filter(q => q.question_type === type).length])),
     k, repeats, local_share: share, full_pages: pages, recent_pages: partialPages, embedding_model: embeddingModel,
     hydradb_mode: 'fast', query_expansion: false, semantic_cache: false, reader_accuracy_measured: false,
@@ -154,5 +166,6 @@ try {
 } finally {
   await drainAllBackgroundWorkForCliExit();
   if (created) await hydraRequest(conn, 'DELETE', '/databases', { query: { database: conn.database } });
+  if (workspace) rmSync(join(workspace, 'live-cloud.json'), { force: true });
   await a.disconnect(); await b.disconnect(); rmSync(scratch, { recursive: true, force: true });
 }

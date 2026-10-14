@@ -119,8 +119,8 @@ function searchOutput(ctx: OperationContext, p: Record<string, unknown>, results
   // The shape is reported where it can vary: remote callers, or an explicit `fields`.
   const shown = ctx.remote !== false || p.fields !== undefined ? { rows } : {};
   // Stage timings are read last, after the returned rows are assembled (meta only, never content).
-  const emit = (output: { meta: Record<string, unknown> }, returned: SearchResult[]) => {
-    ctx.emitResponseMeta?.('retrieval', { ...output.meta, ...(meta.backend === 'hydradb' ? { hydradb: { mode: meta.hydradb_mode ?? 'fast', markdown: markdownForHydraRows(returned, results, typeof p.token_budget === 'number') } } : {}), timings: timings.snapshot() });
+  const emit = (output: { meta: Record<string, unknown> }, returned: SearchResult[], context = returned) => {
+    ctx.emitResponseMeta?.('retrieval', { ...output.meta, ...(meta.backend === 'hydradb' ? { hydradb: { mode: meta.hydradb_mode ?? 'fast', markdown: markdownForHydraRows(context, results, typeof p.token_budget === 'number') } } : {}), timings: timings.snapshot() });
     return returned;
   };
   if (!evidence) {
@@ -134,7 +134,7 @@ function searchOutput(ctx: OperationContext, p: Record<string, unknown>, results
   // An explicit budget's cap holds at this final boundary too (snippet
   // markers and redaction recounted); without one both are no-ops.
   const capped = evidence.explicitSnippet ? capDeliveredSnippets(output.results, snippetCap, output.meta.delivery) : capEvidenceToBudget(output.results, output.meta.delivery);
-  return emit(output, projectRows(capped.map(appendedRowOutput), rows, lean));
+  return emit(output, projectRows(capped.map(appendedRowOutput), rows, lean), capped);
 }
 
 /** C1: the per-call row-shape escape hatch shared by `search` and `query` (`detail` is query's low/medium/high). */

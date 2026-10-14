@@ -46,7 +46,7 @@ beforeAll(async () => {
       removals.push(...body.ids);
       return reply({ deleted_count: mode === 'delete-failed' ? 0 : body.ids.length, results: body.ids.map((id: string) => ({ id, deleted: mode !== 'delete-failed', error: mode === 'delete-failed' ? 'source still indexing' : '' })) });
     }
-    if (path === '/context/status') return reply({ statuses: (new URL(String(input)).searchParams.get('ids') ?? '').split(',').map(id => ({ id, indexing_status: mode === 'index-failed' ? 'failed' : 'completed' })) });
+    if (path === '/context/status') return reply({ statuses: (new URL(String(input)).searchParams.get('ids') ?? '').split(',').map(id => ({ id, indexing_status: mode === 'index-failed' ? 'failed' : mode === 'index-errored' ? 'errored' : 'completed', ...(mode === 'index-errored' ? { error_code: 'E9001' } : {}) })) });
     if (path === '/query') {
       queries++;
       return reply({ chunks: [{ source_title: 'Cloud remote answer', chunk_content: 'The synthetic deployment uses cobalt widgets.', additional_metadata: { gbrain_source: source, gbrain_slug: 'notes/remote-only' } }] });
@@ -226,3 +226,12 @@ if (backend === 'postgres') test('a separate process cannot let an old snapshot 
     rmSync(scratch, { recursive: true, force: true });
   }
 }, 60_000);
+
+test('terminal errored indexing rejects promptly without advancing the mirror cursor', async () => {
+  await putPage(engine, source, 'notes/errored-probe', page('note', 'Index error probe', 'Retry this source after the indexing error.'));
+  await settle(); mode = 'index-errored';
+  await expect(mirrorBrain(engine, conn, { full: true })).rejects.toThrow('indexing failed (E9001)');
+  expect(await engine.getConfig(HYDRADB_CONFIG.pagesCursor)).toBeNull();
+  mode = 'ok'; await mirrorBrain(engine, conn, { full: true });
+  expect(await engine.getConfig(HYDRADB_CONFIG.pagesCursor)).not.toBeNull();
+});

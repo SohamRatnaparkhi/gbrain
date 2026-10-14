@@ -3,7 +3,7 @@ import { hydraRequest, type HydraConnection } from './hydradb.ts';
 
 interface Item { id: string; status?: string; error?: string | null }
 interface IngestReceipt { failed_count?: number; results?: Item[] }
-const INDEX_TIMEOUT_MS = 600_000;
+const INDEX_TIMEOUT_MS = 1_800_000;
 
 export async function ingestHydra(conn: HydraConnection, form: FormData, ids: string[], signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();
@@ -14,9 +14,11 @@ export async function ingestHydra(conn: HydraConnection, form: FormData, ids: st
   const deadline = Date.now() + INDEX_TIMEOUT_MS;
   while (true) {
     signal?.throwIfAborted();
-    const data = await hydraRequest<{ statuses?: Array<{ id: string; indexing_status: string }> }>(conn, 'GET', '/context/status',
+    if (Date.now() >= deadline) throw new Error('HydraDB indexing is still pending; the mirror will retry this batch.');
+    const data = await hydraRequest<{ statuses?: Array<{ id: string; indexing_status: string; error_code?: string }> }>(conn, 'GET', '/context/status',
       { signal, query: { database: conn.database, ids: ids.join(',') }, timeoutMs: Math.min(30_000, Math.max(1, deadline - Date.now())) });
-    if (data?.statuses?.some(s => s.indexing_status === 'failed')) throw new Error('HydraDB indexing failed; the mirror will retry this batch.');
+    const failure = data?.statuses?.find(s => ['failed', 'errored'].includes(s.indexing_status));
+    if (failure) throw new Error(`HydraDB indexing failed${failure.error_code && /^[A-Z][A-Z0-9_-]{0,31}$/.test(failure.error_code) ? ` (${failure.error_code})` : ''}; the mirror will retry this batch.`);
     if (ids.every(id => data?.statuses?.some(s => s.id === id && s.indexing_status === 'completed'))) return;
     if (Date.now() >= deadline) throw new Error('HydraDB indexing is still pending; the mirror will retry this batch.');
     await new Promise(r => setTimeout(r, 1_000));
