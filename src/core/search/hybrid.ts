@@ -41,6 +41,7 @@ import {
 } from './fusion-lists.ts';
 import { type MetadataBoostGate } from './metadata-boost-gate.ts';
 import { enforceTokenBudget } from './token-budget.ts';
+import { hydraPrimarySearch } from './hydra-primary.ts';
 import {
   semanticResultCacheAvailable,
 } from './query-cache.ts';
@@ -1224,6 +1225,8 @@ export async function hybridSearchCached(
   if (opts?.types?.length === 0) return [];
   const timer = opts?._timings ?? UNTIMED;
   const { modeInputForCache, resolvedForCache, knobsHash } = await timer.stage('setup', () => resolveCacheSearchMode(engine, opts));
+  const primary = await hydraPrimarySearch(engine, query, opts, opts?.limit || resolvedForCache.searchLimit);
+  if (primary) return enforceTokenBudget(primary, opts?.tokenBudget ?? resolvedForCache.tokenBudget).results;
   const queryPrefix = opts?._queryPrefix ?? await timer.stage('setup', () => loadEmbeddingQueryPrefix(engine));
   const embeddingOptedOut = opts?._embeddingOptedOut ?? await timer.stage('setup', () => factEmbeddingDisabled(engine));
   // Result caching is off (semanticResultCacheAvailable() === false): skip the
