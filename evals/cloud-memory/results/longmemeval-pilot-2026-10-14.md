@@ -3,7 +3,9 @@
 Six development questions: the lexicographically first question per category in
 `evals/longmemeval/splits-seed42.json`’s `dev40`. Every category contributes one
 question. Each question retains its complete conversation haystack. This is a
-small retrieval pilot, with no reader model or answer-accuracy evaluation.
+small retrieval pilot, with no reader model or answer-accuracy evaluation. It
+was measured on the 0.60.223.0 feature implementation before the subsequent
+upstream cold-start/engine merge; it is not a fresh timing claim for that merge.
 
 Full corpus: **285 sessions**. Reduced local corpus: **89 sessions**,
 the most recent 30% per question, rounded up. HydraDB retains the full corpus.
