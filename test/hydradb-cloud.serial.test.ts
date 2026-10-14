@@ -19,6 +19,7 @@ import { dispatchToolCall } from '../src/mcp/dispatch.ts';
 import { HYDRADB_API_KEY_ENV, HYDRADB_CONFIG, hydraDocId, resolveHydraConnection, saveHydraApiKey } from '../src/core/hydradb.ts';
 import { hydraPrimarySearch } from '../src/core/search/hydra-primary.ts';
 import { mirrorBrain } from '../src/core/hydradb-mirror.ts';
+import { uploadBenchmarkCorpus } from '../evals/cloud-memory/ingest.ts';
 import { runCloud } from '../src/commands/cloud.ts';
 import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
 import { drainAllBackgroundWorkForCliExit } from '../src/core/background-work.ts';
@@ -474,6 +475,19 @@ test('unified graph supporting contexts resolve source metadata before admission
   expect(cloud.calls).toContain('POST /context/list');
   expect(JSON.stringify(rows)).toContain('Unified authorized synthesis.');
   expect(JSON.stringify(rows)).toContain('The owner is team-example.');
+});
+
+test('benchmark uploads use the same page projection and metadata as production mirroring', async () => {
+  const source = await newSource(engine);
+  await putPage(engine, source, 'notes/public-session', page('note', 'Public session', 'The sample appointment starts Thursday.\n\n```text\nRepeated implementation text.\n```'));
+  await connectAll(); await mirrorBrain(engine, conn, { full: true });
+  const id = hydraDocId(source, 'notes/public-session');
+  const expected = structuredClone(cloud.docs.get(id));
+  expect(expected).toBeDefined();
+  cloud.docs.delete(id);
+  const receipt = await uploadBenchmarkCorpus(engine, conn, [source], 1, () => {});
+  expect(receipt.upserted).toBe(1);
+  expect(cloud.docs.get(id)).toEqual(expected);
 });
 
 test('cloud query, search and recall honor page, section and window delivery with readable graph context', async () => {
