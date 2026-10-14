@@ -72,6 +72,14 @@ describe('claimPhaseStamp and claimStateOf', () => {
     // Another claim's stamp: nothing of it is attributed to the current token.
     expect(claimStateOf({ state: 'running', claim_phase: stamp, execution_token: 't2' }, now)).toMatchObject({ phase: 'unrecorded', step: null, step_age_ms: null, waiting_on: 'unknown', owner: null });
   });
+  test('#6650: an undispatched group follower\'s stamp (token and owner, no phase) reads as unrecorded with its owner, never as preparing', () => {
+    const owner = { kind: 'sync', pid: 7, version: '0.60.200.0' };
+    const now = Date.parse('2026-10-08T03:12:00Z');
+    const state = claimStateOf({ state: 'running', claim_phase: { token: 't1', owner, claimed_at: '2026-10-08T03:00:00.123456+00:00' }, execution_token: 't1' }, now);
+    expect(state).toMatchObject({ phase: 'unrecorded', claim_age_ms: 12 * 60_000 - 123, phase_age_ms: null, step: null, owner });
+    expect(state?.why).toContain('a group member its owner has not started yet');
+    expect(claimStall(state, 0)).toBeNull();
+  });
   test('an older owner\'s stamp (no step fields) reads as step null and waiting_on unknown, never inferred', () => {
     const now = Date.parse('2026-10-08T03:12:00Z');
     const old = { phase: 'preparing', claimed_at: '2026-10-08T03:00:00Z', since: '2026-10-08T03:00:00Z', token: 't1' };

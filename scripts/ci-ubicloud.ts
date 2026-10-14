@@ -29,7 +29,7 @@
  * pgvector server + PgBouncer per slot, PGLite snapshots), streamed over SSH
  * while the checkout uploads. The first VM to
  * finish setup runs the machine-level items in order (gitleaks, verify, the
- * serial lane's machine-exclusive files) and then joins the pool. Every other
+ * serial and slow lanes' machine-exclusive files) and then joins the pool. Every other
  * test file is an item in one global heaviest-first queue that idle slots pull
  * from (scripts/ubicloud/schedule.ts); items run through the same wrappers
  * ci:local uses (scripts/ubicloud/ci-item.sh). Durations of every run are
@@ -212,10 +212,11 @@ async function main() {
   }
   const exclusive = lines(sh("bash", ["scripts/run-serial-tests.sh", "--dry-run-list-exclusive"]));
   const serialPool = lines(sh("bash", ["scripts/run-serial-tests.sh", "--dry-run-list"])).filter((f) => !exclusive.includes(f));
+  const slowExclusive = lines(sh("bash", ["scripts/run-slow-tests.sh", "--dry-run-list-exclusive"]));
   const inventory: Record<Lane, string[]> = {
     unit: lines(sh("bash", ["scripts/run-unit-shard.sh", "--dry-run-list"])),
     serial: serialPool,
-    slow: lines(sh("bash", ["scripts/run-slow-tests.sh", "--dry-run-list"])),
+    slow: lines(sh("bash", ["scripts/run-slow-tests.sh", "--dry-run-list"])).filter((f) => !slowExclusive.includes(f)),
     e2e: e2eFiles,
   };
 
@@ -236,6 +237,7 @@ async function main() {
   if (opts.lanes.has("gitleaks")) control.push({ lane: "gitleaks", files: [] });
   if (opts.lanes.has("verify")) control.push({ lane: "verify", files: [] });
   if (opts.lanes.has("serial") && exclusive.length) control.push({ lane: "serial", files: exclusive });
+  if (opts.lanes.has("slow") && slowExclusive.length) control.push({ lane: "slow", files: slowExclusive });
   const totalItems = queue.length + control.reduce((n, c) => n + Math.max(c.files.length, 1), 0);
   const estimate = queue.reduce((s, i) => s + i.weight, 0) / 1000;
   log(`${totalItems} items (${Object.entries(inventory).filter(([l]) => opts.lanes.has(l)).map(([l, f]) => `${l} ${f.length}`).join(", ")}, control ${control.map((c) => c.lane).join("+") || "none"}); ~${Math.round(estimate)}s of weighted work`);

@@ -25,6 +25,7 @@ import { join, resolve, dirname } from 'path';
 import { execSync } from 'child_process';
 import type { Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhaseResult } from './types.ts';
 import { gbrainChildCommand } from './in-process.ts';
+import { releaseRunEngine } from './run-engine.ts';
 import { cliChildStdio } from '../../core/cli-force-exit.ts';
 import { savePreferences, loadPreferences } from '../../core/preferences.ts';
 import { loadConfig, configPath, gbrainPath } from '../../core/config.ts';
@@ -437,6 +438,7 @@ async function orchestrator(opts: OrchestratorOpts): Promise<OrchestratorResult>
     return { version: '0.11.0', status: 'failed', phases };
   }
 
+  await releaseRunEngine();
   const b = phaseBSmoke(opts);
   phases.push(b);
   if (b.status === 'failed') {
@@ -502,6 +504,7 @@ export const v0_11_0: Migration = {
       'user might ask about later.',
   },
   orchestrator,
+  sharesRunEngine: true,
   effects: ['persistent_install'],
 };
 

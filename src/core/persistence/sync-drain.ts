@@ -593,7 +593,8 @@ export function drainClaimOf(row: { head_state: string | null; head_claim_phase:
   const own = !!stamp && !!row.head_token && stamp.token === row.head_token;
   const age = (at: unknown) => { const ms = typeof at === 'string' ? Date.parse(at) : NaN; return Number.isFinite(ms) ? Math.max(0, now - ms) : null; };
   const budget = String(row.head_kind ?? '').startsWith('managed_sync_') ? budgets.syncMs : budgets.maintenanceMs;
-  const phase = own ? stamp!.phase === 'publishing' ? 'publishing' : 'preparing' : null;
+  // #6650: an undispatched group follower's stamp names its owner but no phase; it reads as unstamped, never as preparing.
+  const phase = own && (stamp!.phase === 'publishing' || stamp!.phase === 'preparing') ? stamp!.phase : null;
   const waiting = own ? stamp!.waiting_on : null;
   const owner = own && stamp!.owner && typeof stamp!.owner === 'object' ? stamp!.owner as Record<string, unknown> : null;
   return { phase, step: own && typeof stamp!.step === 'string' ? stamp!.step : null,

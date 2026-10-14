@@ -91,9 +91,17 @@ async function scenario(engine: BrainEngine, config: HarnessConfig) {
   const legacy = await admitWrite(engine, admission(config, sources[1]!, 'stall/legacy', 'legacy body'));
   await engine.executeRaw(`UPDATE persistence_requests SET state='running',execution_token=$2::uuid,claim_expires_at=now()+interval '30 seconds',
     created_at=now()-interval '31 minutes' WHERE id=$1::uuid`, [legacy.id, randomUUID()]);
+  // #6650: an undispatched group follower's stamp (token, owner and claim time, no phase) is aged from its claim time.
+  const follower = await admitWrite(engine, admission(config, sources[0]!, 'stall/follower', 'follower body'));
+  const followerToken = randomUUID();
+  await engine.executeRaw(`UPDATE persistence_requests SET state='running',execution_token=$2::uuid,claim_expires_at=now()+interval '30 seconds',
+    claim_phase=jsonb_build_object('token',$2::text,'owner',jsonb_build_object('kind','sync','pid',4242,'version','v'),'claimed_at',to_jsonb(now()-interval '31 minutes'))
+    WHERE id=$1::uuid`, [follower.id, followerToken]);
   const old = await writeStallCheck(engine);
   expect(old.status).toBe('warn');
-  expect(old.details).toMatchObject({ stalls: [{ request_id: legacy.request_id, phase: 'unrecorded' }] });
+  expect((old.details as { stalls: Array<{ request_id: string }> }).stalls.map(s => s.request_id).sort()).toEqual([legacy.request_id, follower.request_id].sort());
+  expect(old.details).toMatchObject({ stalls: expect.arrayContaining([expect.objectContaining({ request_id: legacy.request_id, phase: 'unrecorded' }),
+    expect.objectContaining({ request_id: follower.request_id, phase: 'unrecorded', stall: null, owner: { kind: 'sync', pid: 4242, version: 'v' } })]) });
   expect(errors).toEqual([]);
 }
 

@@ -108,7 +108,7 @@ In the AlphaClaw UI (Providers tab):
 - **OpenAI API Key.** Required for embeddings if you use the OpenAI provider.
 - **Anthropic API Key.** Required for Claude (the main model the agent talks through).
 - **Perplexity API Key.** Optional, for web search.
-- **Voyage API Key.** Recommended. GBrain ships with Voyage as the default embedder + reranker (`voyage-4` + `rerank-2.5`) — one key covers both, at about half OpenAI's embedding price.
+- **Voyage API Key.** Recommended. GBrain ships with Voyage as the default embedder + reranker (`voyage-4` + `rerank-3-lite`) — one key covers both, at about half OpenAI's embedding price.
 
 You can use the same keys across multiple agents.
 

@@ -85,6 +85,18 @@ describe.skipIf(!linux)('probeLiveFullConsumer skips a row whose owner is provab
   });
 });
 
+describe.skipIf(!linux)('the probe skips dead rows before it bounds the rows it reads (#6650)', () => {
+  test('a live serve behind more than eight dead rows is still the owner', async () => {
+    const dead = Array.from({ length: 9 }, (_, i) => row(deadPid(), 'sync', `2026-10-13 10:00:0${i}+00`));
+    const rows = [...dead, row(live.pid!, 'serve', '2026-10-13 10:00:30+00', { start: liveStart })];
+    const limited = { kind: 'postgres' as const, executeRaw: async (sql: string) => {
+      const limit = /LIMIT (\d+)/.exec(sql);
+      return limit ? rows.slice(0, Number(limit[1])) : rows;
+    } } as never;
+    expect((await probeLiveFullConsumer(limited, '00000000-0000-0000-0000-000000000001'))?.pid).toBe(live.pid);
+  });
+});
+
 describe.skipIf(!linux)('claimOwnerProvablyDead reads a claim stamp (#6650 defect 2)', () => {
   const stamp = (o: Record<string, unknown>) => JSON.stringify({ phase: 'publishing', token: 't', owner: { kind: 'sync', version: '0.0.0', ...o } });
   test('a stamp naming a dead owner, as text or jsonb', () => {

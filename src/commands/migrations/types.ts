@@ -94,4 +94,11 @@ export interface Migration {
    * migration is proven by test/migrations-fresh-install-audit.serial.test.ts.
    */
   fresh_install_noop?: true;
+  /**
+   * The orchestrator opens the brain only through `connectMigrationEngine`
+   * (`./run-engine.ts`) and calls `releaseRunEngine` before any `gbrain` child
+   * that needs the brain, so consecutive flagged migrations of one run share
+   * one PGLite open.
+   */
+  sharesRunEngine?: true;
 }

@@ -85,7 +85,9 @@ the VM running the machine-level items below counts only once it joins the
 pool.
 The first VM to finish setup runs the
 machine-level work first: gitleaks, `verify`, then the serial lane's
-machine-exclusive files one at a time with nothing else on that VM. After that
+machine-exclusive files and the slow lane's latency contracts
+(`run-slow-tests.sh --dry-run-list-exclusive`, the files GitHub CI runs on a
+dedicated perf runner) one at a time with nothing else on that VM. After that
 it joins the pool. Before `verify`, it uploads the incremental typecheck state
 (`node_modules/.cache/gbrain-typecheck.tsbuildinfo`, which the checkout
 tarball never carries). The orchestrator builds that state with

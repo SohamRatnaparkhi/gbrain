@@ -42,10 +42,11 @@ export async function checkSearchMode(engine: BrainEngine): Promise<Check> {
       return { name: 'search_mode', status: 'ok', message: context };
     }
 
-    // v0.48.2: installs from v0.46.3–v0.47.10 carry an explicit
-    // `search.reranker.model voyage:rerank-2.5` row init wrote before the
-    // bundle default caught up. It is now redundant, but `--reset` would also
-    // wipe every OTHER tuned search.* knob — name the exact key instead.
+    // An explicit `search.reranker.model` equal to the bundle default is
+    // redundant, but `--reset` would also wipe every OTHER tuned search.*
+    // knob — name the exact key instead. (Installs from v0.46.3–v0.47.10
+    // carry an init-written `voyage:rerank-2.5` row; since the default moved
+    // to rerank-3-lite that row is a real pin and keeps them on rerank-2.5.)
     const redundant: string[] = [];
     if (resetReranker !== undefined) {
       const explicitModel = await engine.getConfig('search.reranker.model');

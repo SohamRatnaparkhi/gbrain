@@ -170,7 +170,7 @@ describe('eval longmemeval --call-plan', () => {
     expect(p.rows.expansion).toMatchObject({ model: 'anthropic:claude-haiku-4-5-20251001', max_out_tokens: '64000' });
     expect(p.rows.synopsis!.max_out_tokens).toBe('200');
     expect(p.rows.trajectory_extract!.max_out_tokens).toBe('2000');
-    expect(p.rows.rerank).toMatchObject({ model: 'voyage:rerank-2.5', calls: String(QUESTIONS.length), max_out_tokens: '0' });
+    expect(p.rows.rerank).toMatchObject({ model: 'voyage:rerank-3-lite', calls: String(QUESTIONS.length), max_out_tokens: '0' });
     expect(p.text.endsWith(`GSTACK_EVAL_CALLS v1 end: lines=${p.parsed.rows.length}\n`)).toBe(true);
     expect(p.err).toContain('no provider was called');
   }, 60_000);

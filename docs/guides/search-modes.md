@@ -38,7 +38,7 @@ and maintenance commands remain available.
 | `keyword_arm_confidence_floor` | `null` (off)  | `null` (off) | `null` (off)  |
 | `metadata_boost_gate`         | `lexical`      | `lexical`  | `lexical`      |
 | `searchLimit` default         | 10             | 25         | 50             |
-| `reranker` (cross-encoder)    | off            | `voyage:rerank-2.5` | `voyage:rerank-2.5` |
+| `reranker` (cross-encoder)    | off            | `voyage:rerank-3-lite` | `voyage:rerank-3-lite` |
 | `autocut` (rerank-cliff cut)  | off            | off        | off            |
 | `reranker_gate`               | off            | off        | off            |
 
@@ -247,7 +247,7 @@ gbrain search diagnose "<query>" --target <slug>
 
 `gbrain search modes` also answers the question the knob table cannot: is
 the resolved reranker actually going to run? Below the attribution table it
-prints one runtime line — `Reranker: voyage:rerank-2.5 (enabled) —
+prints one runtime line — `Reranker: voyage:rerank-3-lite (enabled) —
 VOYAGE_API_KEY present`, `Reranker: off (resolved) — …`, or `Reranker:
 <model> (enabled but NOT running) — <paste-ready fix>` — and each bundle row
 carries `reranker=… topNIn=… autocut=…`. `--json` exposes the same verdict
@@ -258,6 +258,13 @@ back in fusion order, `gbrain search "<query>" --explain` shows
 brain's reranker is actually running"* — *"turn reranking off for now"* —
 your agent runs `gbrain search modes` / `gbrain doctor`, then either exports
 `VOYAGE_API_KEY` or runs `gbrain config set search.reranker.enabled false`.
+
+The default reranker is Voyage `rerank-3-lite`. It replaced `rerank-2.5`
+after gbrain-evals #148 (v0.10.93) measured 60% lower rerank cost at 50
+candidates × 1,400 tokens with quality within noise. It applies only to
+brains that never set `search.reranker.model`; a brain with an explicit
+model keeps it. To go back to the previous default, run
+`gbrain config set search.reranker.model voyage:rerank-2.5`.
 
 TypeSafe's Jev can be the reranker instead of Voyage (`gbrain decide enable
 rerank` sets it and `gbrain decide disable rerank` restores your previous

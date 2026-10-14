@@ -261,8 +261,9 @@ export function claimStateOf(row: ClaimRow, now = Date.now()): ClaimState | null
     why: 'Its files were being published; the publication recovery path restores or finishes them when the owning process scans its roots again (after a restart if it hung).' };
   if (row.claim_lapsed) return { phase: 'publication_transaction', claim_age_ms: claimAge, phase_age_ms: null, ...detail, resumes_on_its_own: true,
     why: 'Its claim lapsed while it was still running and nothing was published: a transaction holds the request row (renewals cannot reach it) or its owner is gone. It is requeued once that transaction ends or the owner process exits.' };
-  if (!own) return { phase: 'unrecorded', claim_age_ms: null, phase_age_ms: null, ...detail, resumes_on_its_own: false,
-    why: 'The owner has not recorded this claim\'s phase (a claim younger than one renewal, or an owner that predates phase recording).' };
+  // #6650: an undispatched group follower's stamp names its token and owner but no phase yet.
+  if (!own || (stamp!.phase !== 'preparing' && stamp!.phase !== 'publishing')) return { phase: 'unrecorded', claim_age_ms: claimAge, phase_age_ms: null, ...detail, resumes_on_its_own: false,
+    why: 'The owner has not recorded this claim\'s phase (a claim younger than one renewal, a group member its owner has not started yet, or an owner that predates phase recording).' };
   const phase = stamp!.phase === 'publishing' ? 'publishing' : 'preparing';
   return { phase, claim_age_ms: claimAge, phase_age_ms: age(stamp!.since, now), ...detail, resumes_on_its_own: false,
     why: `Its owner is still renewing the claim while it is ${phase === 'preparing' ? 'preparing the write' : 'publishing the write'}${step ? ` (step ${step}, waiting on ${detail.waiting_on})` : ''}, so the lease never lapses and nothing else on its root runs until that work settles or the owner restarts.` };

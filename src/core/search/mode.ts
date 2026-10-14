@@ -32,7 +32,7 @@ import { pickDecideConfig } from '../ai/decide/config.ts';
 import { getRecipe } from '../ai/recipes/index.ts';
 // #3657 seam: the runtime/mode-bundle reranker default has ONE code home
 // (ai/defaults.ts — a leaf module, no SDK loads). The three bundles below
-// resolve through DEFAULT_RERANKER_MODEL (voyage:rerank-2.5 since v0.48.2).
+// resolve through DEFAULT_RERANKER_MODEL (voyage:rerank-3-lite, gbrain-evals #148).
 import { DEFAULT_RERANKER_MODEL } from '../ai/defaults.ts';
 import { normalizeExpansionVariantBudget } from './fusion-lists.ts';
 import { DEFAULT_RELATIONAL_RERANK_PIN, normalizeRelationalRerankPin } from './relational-rerank-pin.ts';
@@ -155,11 +155,11 @@ export interface ModeBundle {
   searchLimit: number;
   /**
    * v0.35.0.0+ — cross-encoder reranker. Off for conservative, on for
-   * balanced/tokenmax. Model: `DEFAULT_RERANKER_MODEL` (voyage:rerank-2.5),
+   * balanced/tokenmax. Model: `DEFAULT_RERANKER_MODEL` (voyage:rerank-3-lite),
    * overridable via `search.reranker.model`. Slots between dedup and token-budget
    * enforcement in hybrid.ts; fail-open on any RerankError (audit-logged).
-   * Cost anchor: ~$0.0003/query at tokenmax topNIn=30 × ~400 tokens/chunk
-   * (rounding error vs Opus, meaningful vs Haiku).
+   * Cost anchor: ~$0.0006/query at tokenmax topNIn=50 with rerank-3-lite
+   * (gbrain-evals #148; rounding error vs Opus, meaningful vs Haiku).
    */
   reranker_enabled: boolean;
 
@@ -608,7 +608,7 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     // tokenmax is the high-cost-tolerant tier that already pays for LLM
     // expansion + 50-result payloads. Reranker is the natural capstone:
     // better ordering of a large candidate set is where rerankers earn
-    // their fee. ~$0.0003/query at this shape; rounding error vs the
+    // their fee. ~$0.0006/query at this shape (rerank-3-lite); rounding error vs the
     // tier's $700/mo @ Opus pairing per CLAUDE.md cost matrix.
     reranker_enabled: true,
     reranker_model: DEFAULT_RERANKER_MODEL,

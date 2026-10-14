@@ -212,6 +212,10 @@ describe('drainClaimOf', () => {
     // The ceiling caps the allowance.
     expect(drainClaimOf({ head_state: 'running', head_claim_phase: stamp(), head_token: 't', head_lapsed: false, head_kind: 'managed_sync_import' }, { ...budgets, ceilingMs: 60_000 }, now)!.allowance_ms).toBe(60_000 + STALL_GRACE_MS);
   });
+  test('#6650: an undispatched group follower\'s stamp (owner, no phase) is unstamped for the stall window and still names its owner', () => {
+    expect(drainClaimOf({ head_state: 'running', head_claim_phase: { token: 't', owner: { kind: 'sync', pid: 9, version: 'v', nonce: 'n9' } }, head_token: 't', head_lapsed: false, head_kind: 'managed_sync_import' }, budgets, now))
+      .toMatchObject({ phase: null, step: null, owner_pid: 9, owner_nonce: 'n9' });
+  });
 
   test('an older owner\'s stamp, a stamp of another claim, or no stamp read as null/unknown, never inferred; a lapsed lease is reported', () => {
     expect(drainClaimOf({ head_state: 'running', head_claim_phase: stamp({ token: 'other' }), head_token: 't', head_lapsed: false, head_kind: null }, budgets, now))

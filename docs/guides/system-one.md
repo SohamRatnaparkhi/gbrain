@@ -531,7 +531,7 @@ what: [TypeSafe data handling](../ai-providers/typesafe.md#what-never-leaves-the
 System One (decide): provider typesafe:jev-1.13.0; key: TYPESAFE_API_KEY
 egress: private=deny; consent query=allow candidates=allow facts=deny conversation=deny; deny_sources: none; fallback: none
 budget: $0.0002 of $1.00 today (remote $0.0000, cap 50%); not covered: S1 on: reranker spend controls (BudgetKind rerank); llm: providers: chat spend controls (BudgetKind chat)
-reranker: voyage:rerank-2.5 (enabled, mode balanced); Jev called: no
+reranker: voyage:rerank-3-lite (enabled, mode balanced); Jev called: no
 
   rerank         ready for on ~$0.5377/1k queries (estimate)
   evidence       on threshold 0.300 (override) ~$0.3873/1k queries (estimate) 24h: 12 decisions, 0.0% errors

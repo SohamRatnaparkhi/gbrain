@@ -20,7 +20,9 @@ import { join } from 'node:path';
 import postgres from '#postgres';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { DEAD_OWNER_SCAN_MS, PersistenceConsumer } from '../../src/core/persistence/consumer.ts';
-import { admitWrite, getWriteRequestById } from '../../src/core/persistence/journal.ts';
+import { admitWrite, claimGroupFollowers, getWriteRequestById } from '../../src/core/persistence/journal.ts';
+import { setClaimOwnerForTest } from '../../src/core/persistence/claim-phase.ts';
+import type { WriteRequest } from '../../src/core/persistence/model.ts';
 import { consumerIdentity, probeLiveFullConsumer } from '../../src/core/persistence/consumer-heartbeat.ts';
 import { processStartTime, readBootId } from '../../src/core/pglite-lock.ts';
 import { admission, fixtures, initializeFixtures, prepared, selectFixtureHost, type FixtureSource, type HarnessConfig } from '../../scripts/persistence/harness.ts';
@@ -79,8 +81,15 @@ async function stageClaim(engine: PostgresEngine, id: string, owner: Record<stri
   return token;
 }
 
+/** Request id -> how many times its mutation was applied (in any transaction, committed or not). */
+const applied = new Map<string, number>();
 function consumerFor(engine: PostgresEngine, config: HarnessConfig, sources: FixtureSource[]) {
-  return new PersistenceConsumer(engine, { engine: 'postgres' }, async (_engine, row) => prepared(row, sources),
+  return new PersistenceConsumer(engine, { engine: 'postgres' }, async (_engine, row) => {
+    const mutation = prepared(row, sources);
+    const apply = mutation.apply;
+    mutation.apply = (tx, snapshot) => { applied.set(row.id, (applied.get(row.id) ?? 0) + 1); return apply(tx, snapshot); };
+    return mutation;
+  },
     { hostId: config.hostId, concurrency: 3, pollMs: 60_000, phaseMs: 5_000, onError: () => {} });
 }
 
@@ -156,6 +165,50 @@ describe.skipIf(!hasDatabase() || !linux)('a claim held by a provably dead owner
       await Bun.sleep(1_000);
       const held = await getWriteRequestById(engine, started.id);
       expect({ state: held?.state, token: held?.execution_token }).toEqual({ state: 'running', token });
+    } finally { await consumer.stop(); }
+  }), 90_000);
+
+  /** A page batch of `size` whose head `owner` claimed and whose followers it claimed but never dispatched (no phase stamp). */
+  async function stageGroup(engine: PostgresEngine, config: HarnessConfig, source: FixtureSource, prefix: string, owner: { pid: number; start: string }, size = 4) {
+    const batch = randomUUID();
+    const rows: WriteRequest[] = [];
+    for (let i = 0; i < size; i++) rows.push(await admitWrite(engine, admission(config, source, `${prefix}-${i}`, `${prefix} body ${i}`, 0,
+      { intent: { content: `${prefix} body ${i}`, page_batch: { id: batch, index: i, size } }, callerIntent: { content: `${prefix} body ${i}` } })));
+    await stageClaim(engine, rows[0]!.id, owner, 30);
+    const head = (await getWriteRequestById(engine, rows[0]!.id))!;
+    setClaimOwnerForTest({ kind: 'sync', version: '0.0.0', nonce: `n-${owner.pid}`, pid_ns: consumerIdentity().pid_ns, boot_id: readBootId(), ...owner });
+    try { expect((await claimGroupFollowers(engine, head, `batch:${batch}`, 10)).length).toBe(size - 1); } finally { setClaimOwnerForTest(undefined); }
+    return rows;
+  }
+
+  test('a killed leader\'s undispatched followers are reclaimed with it in under 10 s and each publishes once', () => withBrain(async ({ engine, config, sources }) => {
+    const rows = await stageGroup(engine, config, sources[0]!, 'dead-a/group', { pid: deadPid(), start: '1' });
+    const followers = await Promise.all(rows.slice(1).map(row => getWriteRequestById(engine, row.id)));
+    expect(followers.map(row => [row?.state, (row?.claim_phase as { phase?: string } | null)?.phase ?? null])).toEqual(followers.map(() => ['running', null]));
+    const consumer = consumerFor(engine, config, sources);
+    const started = Date.now();
+    try {
+      await consumer.tick();
+      await waitFor(async () => (await Promise.all(rows.map(row => getWriteRequestById(engine, row.id)))).every(row => row?.state === 'committed'),
+        { timeoutMs: 10_000, label: 'the leader and every follower commit' });
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(rows.map(row => applied.get(row.id) ?? 0)).toEqual(rows.map(() => 1));
+      const ids = rows.map(row => row.id);
+      expect(await engine.executeRaw(`SELECT e.request_id,e.kind FROM persistence_effects e WHERE e.request_id=ANY($1::uuid[]) GROUP BY e.request_id,e.kind HAVING count(*)>1`, [ids])).toEqual([]);
+      const [pages] = await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM pages WHERE slug LIKE 'dead-a/group-%' AND deleted_at IS NULL`);
+      expect(Number(pages!.n)).toBe(rows.length);
+    } finally { await consumer.stop(); }
+  }), 90_000);
+
+  test('a live, slow leader\'s undispatched followers keep their claims', () => withBrain(async ({ engine, config, sources }) => {
+    const rows = await stageGroup(engine, config, sources[0]!, 'dead-a/slow', { pid: live.pid!, start: liveStart });
+    const before = await Promise.all(rows.map(row => getWriteRequestById(engine, row.id)));
+    const consumer = consumerFor(engine, config, sources);
+    try {
+      await consumer.tick();
+      await Bun.sleep(1_000);
+      const after = await Promise.all(rows.map(row => getWriteRequestById(engine, row.id)));
+      expect(after.map(row => [row?.state, row?.execution_token])).toEqual(before.map(row => ['running', row?.execution_token]));
     } finally { await consumer.stop(); }
   }), 90_000);
 

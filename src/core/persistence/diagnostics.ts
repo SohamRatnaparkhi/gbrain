@@ -58,7 +58,7 @@ export function claimNextAction(claim: ClaimState, stall: ClaimStall | null, pol
     return { code: 'claim_lapsed', retry_after_ms: null, why: `The claim lapsed while running; the request is requeued once the transaction holding its row ends or the owner exits, and the next consumer claims it.`,
       fix: renderAction({ argv: status, consent: [], actor: 'agent', requires_exclusive: false, why: 'Read-only: rerun to see the request requeued or claimed again.', verify: { argv: status } }, ctx) };
   }
-  const age = claim.phase_age_ms ?? claim.claim_age_ms ?? 0;
+  const age = claim.phase === 'unrecorded' ? 0 : claim.phase_age_ms ?? claim.claim_age_ms ?? 0;
   const pastCeiling = claim.phase === 'preparing' && age >= policy.ceilingMs;
   const wedged = owner.row?.restart_required === true || (owner.row?.root_barrier_age_ms ?? -1) > policy.ceilingMs;
   if (pastCeiling || wedged) {
@@ -70,7 +70,7 @@ export function claimNextAction(claim: ClaimState, stall: ClaimStall | null, pol
   const budgetLeft = stall ? Math.max(0, policy.ceilingMs - age) : policy.budgetMs === null ? null : Math.max(0, policy.budgetMs - age);
   return { code: 'claim_running', retry_after_ms: budgetLeft,
     why: stall ? `${who} is past the ${Math.round(stall.budget_ms / 1000)}s preparation budget${where}; its own budget cuts the preparation off and frees the root by the ${Math.round(policy.ceilingMs / 1000)}s ceiling (${Math.round((budgetLeft ?? 0) / 1000)}s left). Nothing to do yet.`
-      : `${who} is ${claim.phase === 'publishing' ? 'publishing' : 'preparing'} this write${where}${owner.live === false ? '; its heartbeat row is not live' : ''}. Nothing to do yet.`,
+      : `${who} ${claim.phase === 'unrecorded' ? 'holds this write and has not recorded starting it (a group member waits for the members before it)' : `is ${claim.phase === 'publishing' ? 'publishing' : 'preparing'} this write`}${where}${owner.live === false ? '; its heartbeat row is not live' : ''}. Nothing to do yet.`,
     fix: renderAction({ argv: status, consent: [], actor: 'agent', requires_exclusive: false, why: 'Read-only: rerun after retry_after_ms to see the step advance or the claim settle.', verify: { argv: status } }, ctx) };
 }
 /**

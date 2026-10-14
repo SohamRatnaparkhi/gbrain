@@ -27,6 +27,8 @@ import { hookEntryHash, removeClaudeHooksAt, writeClaudeHooksAt } from '../src/c
 import { GBRAIN_HOOK_MARKER_VALUE } from '../src/core/bootstrap/host-specs.ts';
 import { codexHookTrustHash, codexTrustHash, removeCodexHooks, writeCodexHooks } from '../src/core/bootstrap/codex-hooks.ts';
 import { appendCodexTomlTable, removeCodexTomlTable } from '../src/core/bootstrap/codex-toml.ts';
+import { defineNormalizer, expectGolden, scrubTimestamps } from './helpers/golden.ts';
+import { VERSION } from '../src/version.ts';
 
 const CLI = resolve(import.meta.dir, '..', 'src', 'cli.ts');
 const roots: string[] = [];
@@ -253,6 +255,12 @@ describe('gbrain setup claude-code: install lifecycle', () => {
 });
 
 describe('gbrain setup: setup migrations on the brain it creates (Cat 41 run 4)', () => {
+  /** The migration records a fresh setup leaves, byte for byte apart from timestamps, the temp home, the brain id and the release stamp (captured on master). */
+  const ledgerFiles = ['completed.jsonl', 'pending-host-work.jsonl', 'v0.22.4-audit.json'];
+  const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+  const migrationLedger = defineNormalizer<{ home: string; files: Record<string, string> }>('setup-migration-ledger-v1', ({ home, files }) =>
+    Object.fromEntries(Object.entries(files).map(([name, text]) =>
+      [name, scrubTimestamps(text.split(home).join('<home>').split(VERSION).join('<version>')).replace(UUID, '<uuid>').split('\n')])));
   const pendingSetupMigrations = async (b: Box): Promise<string[]> => {
     const r = await runCli(['apply-migrations', '--list', '--json'], { env: { ...CLEAN, HOME: b.home, GBRAIN_HOME: b.gbrainHome } });
     return JSON.parse(r.stdout).plan.pending_fresh_install;
@@ -268,6 +276,8 @@ describe('gbrain setup: setup migrations on the brain it creates (Cat 41 run 4)'
     expect(await pendingSetupMigrations(b)).toEqual([]);
     const doctor = await runCli(['doctor', '--json'], { env: { ...CLEAN, HOME: b.home, GBRAIN_HOME: b.gbrainHome } });
     expect(JSON.parse(doctor.stdout).checks.map((c: any) => c.name)).not.toContain('minions_migration');
+    const dir = join(b.gbrainHome, '.gbrain', 'migrations');
+    expectGolden('setup/fresh-setup-migration-ledger', { home: b.home, files: Object.fromEntries(ledgerFiles.map(name => [name, readFileSync(join(dir, name), 'utf8')])) }, migrationLedger);
   });
 
   test('an existing brain is left as it is: setup runs no migrations and prints no migrations line', async () => {

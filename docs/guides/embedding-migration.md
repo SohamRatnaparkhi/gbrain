@@ -29,7 +29,7 @@ llama-server, and other bring-your-own-model providers).
 ## Recommended targets
 
 - **`voyage:voyage-4 --dim 1024`** (the default for new installs). One
-  `VOYAGE_API_KEY` covers embedding, the `rerank-2.5` reranker, and the
+  `VOYAGE_API_KEY` covers embedding, the `rerank-3-lite` reranker, and the
   multimodal model; the voyage-4 family shares one embedding space, so you
   can later point the query model at `voyage-4-large` or `voyage-4-lite`
   without reindexing. Note: **1280 is not a valid Voyage width** (valid:
@@ -389,7 +389,7 @@ disables reranking, `--reranker keep` leaves it, `--reranker
 <provider:model>` picks explicitly (validated before anything runs). When the
 target provider has no reranker (OpenAI), the run prints an ACTION line with
 the exact commands instead of silently enabling a third provider:
-`gbrain config set search.reranker.model voyage:rerank-2.5` (needs
+`gbrain config set search.reranker.model voyage:rerank-3-lite` (needs
 `VOYAGE_API_KEY`) or `gbrain config set search.reranker.enabled false`. A
 failed reranker probe keeps the previous config and is reported as
 `switch_failed` — never silent, never fatal to the migration.

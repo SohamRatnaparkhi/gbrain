@@ -57,6 +57,9 @@ bun install -g github:garrytan/gbrain
 Verify: `gbrain --version` should print a version number. If `gbrain` is not found,
 restart the shell or add the PATH export to the shell profile.
 
+Next, on Claude Code or Codex: `gbrain setup claude-code` (or `gbrain setup codex`), which needs no API
+key ([Step 3](#step-3-create-the-brain)). On any other harness, `gbrain init --pglite --no-embedding` (Step 3).
+
 > **If `bun install -g` aborts or `gbrain doctor` reports `schema_version: 0`** (Bun
 > occasionally blocks the top-level postinstall hook on global installs, so schema
 > migrations don't run automatically), the CLI prints a recovery hint pointing at
@@ -70,6 +73,8 @@ restart the shell or add the PATH export to the shell profile.
 > bun install && bun link
 > ```
 
+Bun blocks gbrain's postinstall on `bun install -g` (`Blocked 1 postinstall`); a new install can skip it: the script only repeats the refusal every gbrain command prints on a Bun below the floor and runs `gbrain apply-migrations --yes --non-interactive`, which has nothing to migrate before a brain exists, and `gbrain setup` creates the brain and applies its setup migrations.
+
 ## Step 2: API Keys
 
 Configured cloud providers receive text: embedding inputs, queries and candidate
@@ -79,7 +84,7 @@ GBrain is keyless. Explain these boundaries before enabling a capability; see
 [memory boundaries](docs/guides/memory-boundaries.md#where-text-goes).
 
 Skip API-key setup for the initial keyless memory path. If the user enables semantic retrieval or paid enrichment, configure the selected provider explicitly. GBrain defaults to the Voyage embedding + reranker stack
-(`voyage:voyage-4` @ 1024d + `voyage:rerank-2.5` — one key covers both); OpenAI is the
+(`voyage:voyage-4` @ 1024d + `voyage:rerank-3-lite` — one key covers both); OpenAI is the
 main alternative, chosen at init via `--embedding-model <provider:model>`.
 **Need to switch an existing brain's embedding or reranker model?** Follow
 the explicit-consent playbook at `skills/migrations/v0.46.3.0.md`. Preview the

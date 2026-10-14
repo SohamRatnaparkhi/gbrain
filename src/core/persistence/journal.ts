@@ -14,7 +14,7 @@ import { pipelined } from '../page-state/transactions.ts';
 import { writeHealth, type WriteHealthFacts } from './health.ts';
 import { writerStamp } from './writer-versions.ts';
 import { intentCarriesContent, intentCarriesPurgedContent, PURGE_PRESENCE_COLUMNS } from './purged-intent.ts';
-import { claimPhaseStamp, startClaimPhase } from './claim-phase.ts';
+import { claimOwner, claimPhaseStamp, startClaimPhase } from './claim-phase.ts';
 import { consumerIdentity } from './consumer-heartbeat.ts';
 import { publicFailureDetail } from './publication-failure.ts';
 import { catalogueError } from '../error-catalogue.ts';
@@ -368,10 +368,13 @@ export async function claimGroupFollowers(engine: BrainEngine, head: WriteReques
     }
     if (!members.length) return [];
     const tokens = members.map(() => randomUUID());
-    // #6278: a follower carries no stamp of its claim until its wave dispatches it (`markDispatched`), so an undispatched follower is never charged.
+    // #6278: a follower carries no phase until its wave dispatches it (`markDispatched`), so an undispatched follower is never
+    // charged. #6650: it does carry its token, owner and claim time, so a consumer that proves the owner dead reclaims it with
+    // the head, and writer status and doctor age the claim from when it was taken.
     return tx.executeRaw<WriteRequest>(`UPDATE persistence_requests r SET state='running',execution_token=t.token,
-      claim_expires_at=now()+($3::double precision*interval '1 millisecond'),updated_at=now(),blocked_reason=NULL,claim_phase=NULL
-      FROM unnest($1::uuid[],$2::uuid[]) AS t(id,token) WHERE r.id=t.id AND r.state='queued' RETURNING r.*`, [members, tokens, leaseMs])
+      claim_expires_at=now()+($3::double precision*interval '1 millisecond'),updated_at=now(),blocked_reason=NULL,
+      claim_phase=jsonb_build_object('token',t.token::text,'owner',$4::text::jsonb,'claimed_at',to_jsonb(now()))
+      FROM unnest($1::uuid[],$2::uuid[]) AS t(id,token) WHERE r.id=t.id AND r.state='queued' RETURNING r.*`, [members, tokens, leaseMs, JSON.stringify(claimOwner())])
       .then(rows => rows.sort((a, b) => Number(BigInt(a.sequence) - BigInt(b.sequence))).map(row => ({ ...row, previous_claim_phase: previous.get(row.id) })));
   });
 }

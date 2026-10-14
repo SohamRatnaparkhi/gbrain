@@ -183,7 +183,7 @@ export async function probeLiveFullConsumer(engine: SqlEngine & Partial<Pick<Bra
   const rows = await engine.executeRaw<RawRow>(`SELECT ${ROW_COLUMNS} FROM persistence_consumers
     WHERE host_id=$1::uuid AND mode IN ('full','promoted') AND kind=ANY($2::text[]) AND NOT (pid=$3::integer AND nonce=$4)
       AND renewed_at > now() - ($5::integer * interval '1 millisecond') AND NOT restart_required
-    ORDER BY started_at,pid LIMIT 8`, [hostId, [...RESIDENT_CONSUMER_KINDS], self.pid, self.nonce, CONSUMER_LIVE_MS], { signal: opts.signal });
+    ORDER BY started_at,pid`, [hostId, [...RESIDENT_CONSUMER_KINDS], self.pid, self.nonce, CONSUMER_LIVE_MS], { signal: opts.signal });
   const ceiling = opts.ceilingMs ?? 600_000;
   const live = rows.map(row => listed(row, self))
     .find(row => !consumerWedged(row, ceiling) && !consumerRowProvablyDead(row, self));

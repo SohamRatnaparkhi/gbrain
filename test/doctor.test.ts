@@ -183,7 +183,7 @@ describe('doctor command', () => {
         });
         for (let i = 0; i < 3; i++) {
           logRerankFailure({
-            model: 'voyage:rerank-2.5', // the resolved default — rows for other models are filtered out
+            model: 'voyage:rerank-3-lite', // the resolved default — rows for other models are filtered out
             reason: 'unknown',
             query_hash: `unknown${i}`,
             doc_count: 30,
@@ -220,7 +220,7 @@ describe('doctor command', () => {
           env: { OPENAI_API_KEY: 'sk-test', VOYAGE_API_KEY: 'pa-test-voyage' },
         });
         logRerankFailure({
-          model: 'voyage:rerank-2.5', // rows are filtered to the resolved model
+          model: 'voyage:rerank-3-lite', // rows are filtered to the resolved model
           reason: 'budget',
           query_hash: 'budget01',
           doc_count: 30,
@@ -259,7 +259,7 @@ describe('doctor command', () => {
         const reasons = ['empty_result_set', 'malformed_shape', 'empty_result_set'] as const;
         reasons.forEach((reason, i) => {
           logRerankFailure({
-            model: 'voyage:rerank-2.5', // the resolved default — rows for other models are filtered out
+            model: 'voyage:rerank-3-lite', // the resolved default — rows for other models are filtered out
             reason,
             query_hash: `passthru${i}`,
             doc_count: 12,
@@ -295,7 +295,7 @@ describe('doctor command', () => {
         });
         for (const [i, reason] of (['empty_result_set', 'malformed_shape'] as const).entries()) {
           logRerankFailure({
-            model: 'voyage:rerank-2.5', // the resolved default — rows for other models are filtered out
+            model: 'voyage:rerank-3-lite', // the resolved default — rows for other models are filtered out
             reason,
             query_hash: `passthru-low${i}`,
             doc_count: 12,
