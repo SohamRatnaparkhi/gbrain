@@ -16,7 +16,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { PageType, SearchResult } from '../types.ts';
 import { isConfigTruthy } from '../config.ts';
 import { warnOncePerProcess } from '../utils.ts';
-import { HYDRADB_CONFIG, queryHydra, resolveHydraConnection, type HydraConnection } from '../hydradb.ts';
+import { HYDRADB_CONFIG, hasHydraKey, queryHydra, resolveHydraConnection, type HydraConnection } from '../hydradb.ts';
 import { pageKey, pageReadability, pageReadFilter } from './read-policy-sql.ts';
 import { buildVisibilityClause } from './sql-ranking.ts';
 import type { HybridSearchOpts } from './hybrid.ts';
@@ -52,7 +52,7 @@ async function readableChunks(engine: BrainEngine, refs: Array<{ sourceId: strin
 export async function hydraPrimarySearch(engine: BrainEngine, query: string, opts: HybridSearchOpts | undefined, limit: number): Promise<SearchResult[] | null> {
   if (LOCAL_ONLY_OPTS.some(k => { const v = opts?.[k]; return Array.isArray(v) ? v.length > 0 : v !== undefined && v !== null && v !== 0 && v !== ''; })
     || opts?.crossModal === 'image') return null;
-  if (!isConfigTruthy(await engine.getConfig(HYDRADB_CONFIG.primary))) return null;
+  if (!await hasHydraKey() || !isConfigTruthy(await engine.getConfig(HYDRADB_CONFIG.primary))) return null;
   const conn = await resolveHydraConnection(engine);
   if (!conn) return null;
   return (opts?._timings ?? UNTIMED).stage('hydradb', () => rankFromHydra(engine, conn, query, opts, limit));

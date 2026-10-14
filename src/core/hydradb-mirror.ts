@@ -22,7 +22,7 @@ import { horizonIso, toMicroIso } from './context/delta-cursor.ts';
 import { prepareFenceAwareMarkdownChunks } from './markdown-chunks.ts';
 import { isPrivatePage } from './search/private-visibility.ts';
 import { redactFindings } from './secret-scan.ts';
-import { HYDRADB_CONFIG, hydraDocId, hydraDocMetadata, hydraRequest, resolveHydraConnection, type HydraConnection } from './hydradb.ts';
+import { HYDRADB_CONFIG, hasHydraKey, hydraDocId, hydraDocMetadata, hydraRequest, resolveHydraConnection, type HydraConnection } from './hydradb.ts';
 import { pageKey } from './search/read-policy-sql.ts';
 import { registerBackgroundWorkDrainer } from './background-work.ts';
 
@@ -147,6 +147,10 @@ const queued = new Map<BrainEngine, { refs: Map<string, PageRef>; timer: ReturnT
 const pushing = new Set<Promise<void>>();
 
 export function scheduleCloudPush(engine: BrainEngine, ref: PageRef): void {
+  void hasHydraKey().then((has) => { if (has) enqueue(engine, ref); });
+}
+
+function enqueue(engine: BrainEngine, ref: PageRef): void {
   const entry = queued.get(engine) ?? { refs: new Map<string, PageRef>(), timer: setTimeout(() => flushCloudPush(engine), PUSH_DEBOUNCE_MS) };
   entry.timer.unref?.();
   entry.refs.set(pageKey(ref.source_id, ref.slug), { source_id: ref.source_id, slug: ref.slug });

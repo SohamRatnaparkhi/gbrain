@@ -79,6 +79,20 @@ export async function saveHydraApiKey(apiKey: string): Promise<string> {
   return id;
 }
 
+/**
+ * Whether this machine holds a HydraDB key at all (env, or a vault entry; the
+ * vault is re-read at most every 30 s). Searches and writes check this first,
+ * so a machine that never connected pays no database read for the feature.
+ */
+let vaultHasKey: { at: number; has: boolean } | undefined;
+export async function hasHydraKey(): Promise<boolean> {
+  if (process.env[HYDRADB_API_KEY_ENV]) return true;
+  if (!vaultHasKey || Date.now() - vaultHasKey.at > 30_000) {
+    vaultHasKey = { at: Date.now(), has: (await openVault().list({ provider: HYDRADB_PROVIDER }).catch(() => [])).length > 0 };
+  }
+  return vaultHasKey.has;
+}
+
 /** The connected database and its key, or null when this brain never connected (or its key is gone). */
 export async function resolveHydraConnection(engine: Pick<BrainEngine, 'getConfig'>): Promise<HydraConnection | null> {
   const database = await engine.getConfig(HYDRADB_CONFIG.database);
