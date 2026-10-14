@@ -60,11 +60,15 @@ async function fakeHydra(input: string | URL | Request, init?: RequestInit): Pro
       for (const [i, item] of items.entries()) {
         cloud.docs.set(item.id, { id: item.id, title: files[i]!.name.replace(/\.md$/, ''), markdown: await files[i]!.text(), meta: item.additional_metadata });
       }
-      return reply({}, 202);
+      return reply({ failed_count: 0, results: items.map((item: { id: string }) => ({ id: item.id, status: 'queued' })) }, 202);
     }
-    case 'DELETE /context':
-      for (const id of json().ids) cloud.docs.delete(id);
-      return reply({});
+    case 'GET /context/status':
+      return reply({ statuses: (url.searchParams.get('ids') ?? '').split(',').map(id => ({ id, indexing_status: 'completed' })) });
+    case 'DELETE /context': {
+      const ids = json().ids as string[];
+      for (const id of ids) cloud.docs.delete(id);
+      return reply({ deleted_count: ids.length, results: ids.map(id => ({ id, deleted: true })) });
+    }
     case 'POST /query': {
       const body = json();
       cloud.queries.push(body);
@@ -117,7 +121,7 @@ beforeAll(async () => {
   await putPage(engine, sourceId, 'notes/forge-offsite', page('note', 'Forge offsite', 'The Forge offsite is booked in Santa Fe.'));
   await putPage(engine, sourceId, 'people/acme-founder', page('person', 'Acme founder', `Builds widgets.\n\n${FENCE}`));
   await putPage(engine, sourceId, 'notes/diary', page('note', 'Diary', 'A private entry about the Forge offsite.', 'visibility: private\n'));
-  await putPage(engine, sourceId, 'notes/garden', page('note', 'Garden', 'Tomatoes need water. CI token ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8.'));
+  await putPage(engine, sourceId, 'notes/garden', page('note', 'Garden', 'Tomatoes need water. CI token ghp_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8.'));
   await putPage(engine, otherSource, 'notes/elsewhere', page('note', 'Elsewhere', 'Another source.'));
   await putPage(engine, sourceId, 'notes/retired', page('note', 'Retired', 'An old Forge offsite plan.'));
   await engine.softDeletePage('notes/retired', { sourceId });
@@ -148,10 +152,10 @@ describe('mirror', () => {
     const founder = cloud.docs.get(hydraDocId(sourceId, 'people/acme-founder'))!;
     expect(founder.markdown).toContain('Founded Acme in 2017');
     expect(founder.markdown).not.toContain('Prefers async');
-    expect(founder.meta).toEqual({ gbrain_source: sourceId, gbrain_slug: 'people/acme-founder' });
+    expect(founder.meta).toMatchObject({ gbrain_source: sourceId, gbrain_slug: 'people/acme-founder', gbrain_type: 'person' });
     const garden = cloud.docs.get(hydraDocId(sourceId, 'notes/garden'))!.markdown;
     expect(garden).toContain('Tomatoes need water.');
-    expect(garden).not.toContain('ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8');
+    expect(garden).not.toContain('ghp_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8');
   });
 
   test('resumes from the cursor and keeps it when HydraDB fails', async () => {
@@ -228,13 +232,12 @@ describe('HydraDB as primary search', () => {
     expect(text).not.toContain('private entry');
   });
 
-  test('a filter HydraDB cannot apply searches locally without calling it', async () => {
-    const off = await query({ offset: 1 });
+  test('pagination keeps HydraDB ranking instead of switching to local search', async () => {
     await connectAll();
     cloudDoc(sourceId, 'notes/garden', 'Tomatoes need water.');
-    cloud.queries = [];
-    expect(JSON.stringify(await query({ offset: 1 }))).toBe(JSON.stringify(off));
-    expect(cloud.queries).toEqual([]);
+    cloudDoc(sourceId, 'notes/forge-offsite', 'The Forge offsite is booked in Santa Fe.');
+    expect(pages(await query({ offset: 1 }))).toEqual([['page', 'notes/forge-offsite', sourceId]]);
+    expect(cloud.queries).toHaveLength(1);
   });
 
   test('a committed page write is pushed to HydraDB', async () => {

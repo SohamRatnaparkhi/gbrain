@@ -5,8 +5,8 @@ and future, to a HydraDB database and makes HydraDB the search backend: `query`,
 `search` and `recall` rank with HydraDB. It is off until you connect. The brain
 keeps a full local copy, which stays the system of record for writes, links,
 facts and versions, and is searched whenever HydraDB is off or unreachable.
-Another device connected to the same database searches the whole brain, even
-before it holds the pages.
+Another device connected to the same database can retrieve passages from its
+readable sources even before it holds the pages locally.
 
 ## Quick start
 
@@ -21,8 +21,8 @@ gbrain cloud status           # database, key prefix, search backend, last push
 ```
 
 You need a HydraDB API key from <https://dashboard.hydradb.com>. `connect` takes it
-from `HYDRA_DB_API_KEY`, from stdin (`--key -`), or from a prompt, and stores it in
-the credential vault (`~/.gbrain/credentials.json`, 0600). The config table holds
+from `HYDRA_DB_API_KEY`, from stdin (`--key -`), or from a prompt. Prompted/stdin
+keys are stored in the credential vault (`~/.gbrain/credentials.json`, 0600). The config table holds
 only the vault id.
 
 ## What leaves the machine
@@ -42,14 +42,15 @@ A page that turns private, empties out, or is deleted is removed from the cloud.
 
 - **Backfill:** `connect` sends every existing page.
 - **On every write:** each committed page write (put, edit, delete, import, sync,
-  `remember`, connector syncs) is pushed a moment after it settles.
+  connector syncs) is pushed a moment after it settles.
 - **Catch-up:** the `cloud_mirror` autopilot phase sends everything changed since
   its cursor, including maintenance writes (dream, chronicle, extraction) that
   don't go through the write journal, and anything a failed push missed.
 
-`gbrain cloud push` mirrors now; `--full` re-sends every page. HydraDB indexes
-asynchronously: a deletion stops matching almost at once, while a new or edited
-page can take up to about half a minute to be searchable.
+`gbrain cloud push` mirrors now; `--full` re-sends every page. The mirror checks
+every upload and deletion result and waits for indexing before advancing its
+cursor. Failed or unfinished batches remain retryable;
+`last_push_at` describes a completed mirror, not merely an accepted upload.
 
 Bound: a page soft-deleted and then purged while every mirror run failed stays in
 the cloud until `gbrain cloud disconnect --purge-cloud`.
@@ -67,13 +68,18 @@ brain's own page row under the caller's full read policy, so trust labels,
 - the page is not here (another device's): a `result_type: "cloud"` row with the
   passage, labelled `trust_tier: unknown`, dropped for callers with a trust floor.
 
-Searched locally instead:
+Source, type, date, slug and pagination filters stay in effect while HydraDB
+owns relevance and ranking.
 
-- queries with filters HydraDB can't apply (`offset`, types, slug filters,
-  dates, `--since`/`--until`, language, symbols, image search);
-- any query while HydraDB is unreachable, slow, or returns an error;
-- `recall` on a brain without an embedding key, and `context_pack`, which reads
-  entity cards rather than searching.
+No separate embedding-provider key is needed: `query`, normal `search` and
+`recall --query` use HydraDB even on a brain initialized with `--no-embedding`.
+GBrain does not run its local vector retrieval, fusion or reranker for a
+successful cloud search. It checks local access rules and delivers the results.
+
+A cloud outage or timeout falls back to local search. Explicit `search
+--match keyword` enumeration, image similarity, structural symbol walks and
+record reads (`get_page`, saved-fact lists, `context_pack`) keep their existing
+local contracts. They are not natural-language cloud searches.
 
 While HydraDB is primary, private pages are not searchable (they are never sent),
 and a page written seconds ago may not be found yet.
@@ -88,3 +94,32 @@ gbrain cloud disconnect --purge-cloud     # also delete the HydraDB database
 
 `hydradb.*` keys are not settable with `gbrain config set`: `gbrain cloud connect`
 is the only way to turn this on, so it can't be enabled around the disclosure.
+
+## With gstack
+
+After the usual `/setup-gbrain`, run `gbrain cloud connect`. Existing gstack
+context queries call GBrain and automatically use its selected backend.
+The context loader defaults to a 500 ms subprocess budget. Allow time for a
+cloud round trip and CLI startup by setting this in the environment that
+launches your agent:
+
+```bash
+export GSTACK_BRAIN_TIMEOUT_MS=10000
+gbrain cloud connect
+```
+
+**Say to your agent:** *"Connect my gstack memory to HydraDB and allow ten seconds
+for context loading."* Automatic transcript capture remains a separate opt-in.
+
+## Staging and live verification
+
+`gbrain cloud connect --api-url https://api-v2-go.staging.hydradb.com` selects
+staging explicitly (or set `HYDRA_DB_BASE_URL` before connecting). Only HTTPS
+HydraDB API origins are accepted; the selected endpoint is stored per brain and
+shown in `cloud status --json`.
+
+The opt-in `bun evals/cloud-memory/smoke.ts` uses `HYDRA_DB_API_KEY` and optionally
+`HYDRA_DB_BASE_URL`. It creates and removes its own synthetic database, checks
+cloud-only retrieval without an embedding provider, filters, edits, deletion
+and the local off switch. Set `GBRAIN_GSTACK_ROOT` to a gstack checkout to also
+exercise its context loader through the real GBrain CLI.

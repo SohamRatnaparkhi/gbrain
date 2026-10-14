@@ -856,6 +856,8 @@ async function applyAliasResolvedBoost(
 }
 
 export interface HybridSearchOpts extends SearchOpts {
+  /** The wrapper already attempted HydraDB; local fallback must not query it twice. */
+  _hydraTried?: boolean;
   expansion?: boolean;
   /** System One: remote spend accounting, call site, S1-only re-runs (see search/decide-stage.ts). */
   decide?: import('./decide-stage.ts').DecideSearchOpts;
@@ -1098,6 +1100,10 @@ export async function hybridSearch(
   opts?: HybridSearchOpts,
 ): Promise<SearchResult[]> {
   if (opts?.types?.length === 0) return [];
+  if (!opts?._hydraTried) {
+    const cloud = await hydraPrimarySearch(engine, query, opts, opts?.limit || 20);
+    if (cloud !== null) return cloud;
+  }
   const timer = opts?._timings ?? UNTIMED;
   if (opts?.type || opts?.types?.length) {
     const { expandEngineTypeFilters } = await import('../schema-pack/query-types.ts');
@@ -1225,7 +1231,7 @@ export async function hybridSearchCached(
   if (opts?.types?.length === 0) return [];
   const timer = opts?._timings ?? UNTIMED;
   const { modeInputForCache, resolvedForCache, knobsHash } = await timer.stage('setup', () => resolveCacheSearchMode(engine, opts));
-  const primary = await hydraPrimarySearch(engine, query, opts, opts?.limit || resolvedForCache.searchLimit);
+  const primary = opts?._hydraTried ? null : await hydraPrimarySearch(engine, query, opts, opts?.limit || resolvedForCache.searchLimit);
   if (primary) return enforceTokenBudget(primary, opts?.tokenBudget ?? resolvedForCache.tokenBudget).results;
   const queryPrefix = opts?._queryPrefix ?? await timer.stage('setup', () => loadEmbeddingQueryPrefix(engine));
   const embeddingOptedOut = opts?._embeddingOptedOut ?? await timer.stage('setup', () => factEmbeddingDisabled(engine));
@@ -1289,6 +1295,7 @@ export async function hybridSearchCached(
   const userOnMeta = opts?.onMeta;
   const results = await hybridSearch(engine, query, {
     ...opts,
+    _hydraTried: true,
     // v0.42.20.0 (Fix 3) — share the query-embed deadline so the inner embed
     // doesn't start a fresh 6s budget after the cache-lookup already spent it.
     _queryEmbedDeadline: queryEmbedDl,

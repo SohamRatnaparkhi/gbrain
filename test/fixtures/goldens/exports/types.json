@@ -725,6 +725,7 @@
           "adaptive_return?: AdaptiveReturnDecision | undefined",
           "answerability?: AnswerabilityVerdict | undefined",
           "autocut?: AutocutDecision | undefined",
+          "backend?: \"hydradb\" | undefined",
           "cache?: { status: \"hit\" | \"miss\" | \"disabled\"; similarity?: number; age_seconds?: number; } | undefined",
           "decide?: Partial<Record<\"rerank\" | \"intent\" | \"evidence\" | \"answerable\" | \"injection\" | \"recall_needed\" | \"triage\" | \"grounding\" | \"conflict\", DecideSlotMeta>> | undefined",
           "degraded?: DegradedStageEntry[] | undefined",
@@ -1482,7 +1483,7 @@
           "rerank_score?: number | undefined",
           "rerank_score_kind?: \"rubric\" | undefined",
           "reranker_delta?: number | undefined",
-          "result_type?: \"fact\" | undefined",
+          "result_type?: \"fact\" | \"cloud\" | undefined",
           "rrf?: RrfAttribution | undefined",
           "salience_boost?: number | undefined",
           "score: number",
@@ -6879,7 +6880,7 @@
         "kind": "type",
         "name": "AutoReason",
         "signature": [
-          "\"conversation_type\" | \"conversation_slug\" | \"not_conversation\" | \"conversation_over_budget\" | \"saved_fact\""
+          "\"conversation_type\" | \"conversation_slug\" | \"not_conversation\" | \"conversation_over_budget\" | \"saved_fact\" | \"cloud_passage\""
         ]
       },
       {
@@ -7356,6 +7357,7 @@
         "kind": "interface",
         "members": [
           "_embeddingOptedOut?: boolean | undefined",
+          "_hydraTried?: boolean | undefined",
           "_queryEmbedDeadline?: (() => QueryEmbedDeadline) | undefined",
           "_queryPrefix?: string | undefined",
           "_searchModeInput?: ResolveSearchModeInput | undefined",
@@ -8480,6 +8482,7 @@
           "adaptive_return?: AdaptiveReturnDecision | undefined",
           "answerability?: AnswerabilityVerdict | undefined",
           "autocut?: AutocutDecision | undefined",
+          "backend?: \"hydradb\" | undefined",
           "cache?: { status: \"hit\" | \"miss\" | \"disabled\"; similarity?: number; age_seconds?: number; } | undefined",
           "decide?: Partial<Record<\"rerank\" | \"intent\" | \"evidence\" | \"answerable\" | \"injection\" | \"recall_needed\" | \"triage\" | \"grounding\" | \"conflict\", DecideSlotMeta>> | undefined",
           "degraded?: DegradedStageEntry[] | undefined",
@@ -9006,7 +9009,7 @@
           "rerank_score?: number | undefined",
           "rerank_score_kind?: \"rubric\" | undefined",
           "reranker_delta?: number | undefined",
-          "result_type?: \"fact\" | undefined",
+          "result_type?: \"fact\" | \"cloud\" | undefined",
           "rrf?: RrfAttribution | undefined",
           "salience_boost?: number | undefined",
           "score: number",

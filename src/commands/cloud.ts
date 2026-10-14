@@ -29,6 +29,7 @@ import { openVault } from '../core/creds/vault.ts';
 import {
   DEFAULT_HYDRADB_DATABASE, HYDRADB_API_KEY_ENV, HYDRADB_CONFIG, HydraDBError,
   apiKeyPrefix, hydraRequest, resolveHydraConnection, saveHydraApiKey, type HydraConnection,
+  HYDRADB_BASE_URL, HYDRADB_BASE_URL_ENV, hydraBaseUrl,
 } from '../core/hydradb.ts';
 import { mirrorBrain } from '../core/hydradb-mirror.ts';
 
@@ -46,6 +47,7 @@ function printHelp(): void {
     'Subcommands:',
     '  connect               Show what is shared, ask, store the API key, mirror the brain.',
     '                          --database <name>  HydraDB database (default: gbrain)',
+    '                          --api-url <url>    HydraDB endpoint (default: production)',
     `                          --key -            read the API key from stdin (else ${HYDRADB_API_KEY_ENV} or a prompt)`,
     '                          --no-push          connect without the first mirror',
     '  status [--json]       Connection, recall and mirror state (never prints the key).',
@@ -57,11 +59,11 @@ function printHelp(): void {
   ].join('\n'));
 }
 
-function disclosure(database: string): string {
+function disclosure(database: string, baseUrl = HYDRADB_BASE_URL): string {
   return [
     `[gbrain] Connect this brain to HydraDB cloud memory (database "${database}")?`,
     '[gbrain]',
-    '[gbrain]  - Every page, now and on each write, is copied to api.hydradb.com: the text gbrain gives',
+    `[gbrain]  - Every page, now and on each write, is copied to ${new URL(baseUrl).host}: the text gbrain gives`,
     '[gbrain]    an embedding provider, with detected secrets (keys, tokens) redacted. Private pages,',
     '[gbrain]    private fact rows, embed-skipped and quarantined pages stay here.',
     '[gbrain]  - HydraDB becomes the search backend: query, search and recall rank with HydraDB; this',
@@ -117,7 +119,9 @@ async function push(engine: BrainEngine, conn: HydraConnection, full: boolean): 
 async function connect(engine: BrainEngine, args: string[]): Promise<void> {
   const dbFlag = args.indexOf('--database');
   const database = (dbFlag >= 0 ? args[dbFlag + 1] : undefined) ?? DEFAULT_HYDRADB_DATABASE;
-  console.log(disclosure(database));
+  const urlFlag = args.indexOf('--api-url');
+  const baseUrl = hydraBaseUrl(urlFlag >= 0 ? args[urlFlag + 1] : process.env[HYDRADB_BASE_URL_ENV]);
+  console.log(disclosure(database, baseUrl));
   if (!args.includes('--yes')) {
     if (!isInteractive()) {
       console.error('[cloud] non-interactive session: refusing to send this brain to a cloud service without explicit consent. Nothing was written.');
@@ -143,7 +147,7 @@ async function connect(engine: BrainEngine, args: string[]): Promise<void> {
     setCliExitVerdict(1);
     return;
   }
-  const conn: HydraConnection = { database, apiKey: apiKey.key };
+  const conn: HydraConnection = { database, apiKey: apiKey.key, baseUrl };
   let ready: boolean;
   try {
     ready = await ensureDatabase(conn);
@@ -154,6 +158,7 @@ async function connect(engine: BrainEngine, args: string[]): Promise<void> {
   }
   if (!apiKey.fromEnv) await engine.setConfig(HYDRADB_CONFIG.credentialId, await saveHydraApiKey(apiKey.key));
   await engine.setConfig(HYDRADB_CONFIG.database, database);
+  await engine.setConfig(HYDRADB_CONFIG.baseUrl, baseUrl);
   await engine.setConfig(HYDRADB_CONFIG.primary, 'true');
   console.log(`✓ Connected to HydraDB database "${database}" (key ${apiKeyPrefix(apiKey.key)}…).`);
   if (!ready) {
@@ -170,6 +175,7 @@ async function status(engine: BrainEngine, args: string[]): Promise<void> {
   const row = {
     connected: !!database,
     database,
+    api_url: await engine.getConfig(HYDRADB_CONFIG.baseUrl) ?? HYDRADB_BASE_URL,
     key: conn ? `${apiKeyPrefix(conn.apiKey)}…` : null,
     key_source: conn ? (process.env[HYDRADB_API_KEY_ENV] ? 'env' : 'vault') : null,
     primary: isConfigTruthy(await engine.getConfig(HYDRADB_CONFIG.primary)),

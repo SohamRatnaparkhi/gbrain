@@ -11,6 +11,7 @@ import { readHolders } from './context.ts';
  */
 
 import { hybridSearchCached, stampContentFlags, stampUnverifiedExtractions } from '../search/hybrid.ts';
+import { hydraPrimaryEnabled, usesHydraSearch } from '../search/hydra-primary.ts';
 import { anchorOpResults } from '../search/entity-anchor.ts';
 import { applyQueryArms } from '../search/query-arms.ts';
 import { appendedRowOutput } from '../search/facts-arm.ts';
@@ -734,7 +735,7 @@ const search: Operation = {
     const keywordOnly = (await setup(() => ctx.engine.getConfig('search.mcp_keyword_only'))) === 'true';
     const readOpts = { excludePrivate, requireSafeChunks: ctx.remote !== false, ...scope };
 
-    if (keywordOnly || paging.match === 'keyword') {
+    if ((keywordOnly && !await hydraPrimaryEnabled(ctx.engine)) || paging.match === 'keyword') {
       if (types) {
         types = (await setup(() => expandEngineTypeFilters(ctx.engine, { types, ...scope }))).types;
         if (types?.length === 0) return [];
@@ -789,13 +790,13 @@ const search: Operation = {
       ...searchOpts, onMeta: (m) => { capturedMeta = m; }, explain: p.explain === true, explainTarget: explainPrep?.trace,
     });
     const declarations = new DeclarationMemo();
-    const fanned = offset === 0
+    const fanned = offset === 0 && !usesHydraSearch(capturedMeta)
       ? await timings.stage('alias_fanout', () => withAliasFanOut(ctx.engine, primary, queryText, { ...scope, excludePrivate },
         { excludePrivate, requireSafeChunks: ctx.remote !== false, ...(types ? { types } : {}), ...scope }, () => declarations.scan(primary, queryText)))
       : { results: primary };
     let results = fanned.results.map(r => ({ ...r }));
     await emitFanoutNotices(ctx, fanned.fanout, scope);
-    results = await timings.stage('anchoring', () => anchorOpResults(ctx.engine, p, queryText, results, { ...scope, excludePrivate, requireSafeChunks: ctx.remote !== false, filtered: !!types, evidencePlan: !!plan }));
+    if (!usesHydraSearch(capturedMeta)) results = await timings.stage('anchoring', () => anchorOpResults(ctx.engine, p, queryText, results, { ...scope, excludePrivate, requireSafeChunks: ctx.remote !== false, filtered: !!types, evidencePlan: !!plan }));
     stampDeepResearchIds(results);
     const latency_ms = Date.now() - startedAt;
     bumpLastRetrievedAt(ctx.engine, results.map((r) => r.page_id));
@@ -1047,10 +1048,10 @@ const query: Operation = {
     });
     const declarations = new DeclarationMemo();
     const primaryRows = results;
-    const fanned = await timings.stage('alias_fanout', () => withAliasFanOut(ctx.engine, primaryRows, queryText, { ...querySourceScope, excludePrivate },
+    const fanned = usesHydraSearch(capturedMeta) ? { results: primaryRows } : await timings.stage('alias_fanout', () => withAliasFanOut(ctx.engine, primaryRows, queryText, { ...querySourceScope, excludePrivate },
       { excludePrivate, requireSafeChunks: ctx.remote !== false, ...(types ? { types } : {}), ...querySourceScope }, () => declarations.scan(primaryRows, queryText)));
     await emitFanoutNotices(ctx, fanned.fanout, querySourceScope);
-    results = await applyQueryArms(ctx.engine, p, queryText, fanned.results, { ...querySourceScope, excludePrivate, requireSafeChunks: ctx.remote !== false, filtered: !!types, evidencePlan: !!plan, evidenceBudget: plan?.budgetTokens, remote: ctx.remote !== false, queryEmbedding, rowCap: () => resolveEffectiveLimit(ctx, p), timer: timings });
+    results = usesHydraSearch(capturedMeta) ? fanned.results : await applyQueryArms(ctx.engine, p, queryText, fanned.results, { ...querySourceScope, excludePrivate, requireSafeChunks: ctx.remote !== false, filtered: !!types, evidencePlan: !!plan, evidenceBudget: plan?.budgetTokens, remote: ctx.remote !== false, queryEmbedding, rowCap: () => resolveEffectiveLimit(ctx, p), timer: timings });
     // #1663 — CRAG confidence gate. Grade what retrieval returned (zero-LLM;
     // reads the stamped honesty signals: evidence, exact_lookup, rerank
     // score), attach grade + query shape to the retrieval meta on EVERY call,
@@ -1068,7 +1069,7 @@ const query: Operation = {
       query_shape: queryShape,
       ...(grade.top_rerank_score !== undefined ? { top_rerank_score: grade.top_rerank_score } : {}),
     };
-    if (grade.level === 'weak') {
+    if (grade.level === 'weak' && !usesHydraSearch(capturedMeta)) {
       const [escalationCfg, thinkCfg] = await Promise.all([
         ctx.engine.getConfig('search.crag_escalation').catch(() => null),
         ctx.engine.getConfig('search.crag_think').catch(() => null),

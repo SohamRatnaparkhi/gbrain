@@ -8,7 +8,7 @@
  * finds are redacted on top. A private page or an empty projection is removed
  * from the cloud instead, as is every page soft-deleted since the last run.
  *
- * Pages walk the `(updated_at, slug)` keyset behind the delta commit-lag
+ * Pages walk the `(updated_at, slug, source_id)` keyset behind the delta commit-lag
  * horizon; the cursor advances after each batch lands, so an interrupted or
  * failed run resumes where it stopped. Bound: a page soft-deleted and then
  * purged (72h) while every run failed stays in the cloud until
@@ -22,7 +22,8 @@ import { horizonIso, toMicroIso } from './context/delta-cursor.ts';
 import { prepareFenceAwareMarkdownChunks } from './markdown-chunks.ts';
 import { isPrivatePage } from './search/private-visibility.ts';
 import { redactFindings } from './secret-scan.ts';
-import { HYDRADB_CONFIG, hasHydraKey, hydraDocId, hydraDocMetadata, hydraRequest, resolveHydraConnection, type HydraConnection } from './hydradb.ts';
+import { HYDRADB_CONFIG, hasHydraKey, hydraDocId, hydraDocMetadata, resolveHydraConnection, type HydraConnection } from './hydradb.ts';
+import { ingestHydra, deleteHydra } from './hydradb-transfer.ts';
 import { pageKey } from './search/read-policy-sql.ts';
 import { registerBackgroundWorkDrainer } from './background-work.ts';
 
@@ -56,53 +57,67 @@ async function projection(engine: BrainEngine, page: Page): Promise<string> {
  * `app_knowledge` item of a type it has no connector parser for is chunked as
  * its serialized JSON. The title leads the body because files carry none.
  */
-async function ingest(conn: HydraConnection, pages: Array<{ page: Page; text: string }>): Promise<void> {
+async function ingest(conn: HydraConnection, pages: Array<{ page: Page; text: string }>, signal?: AbortSignal): Promise<void> {
   if (!pages.length) return;
   const form = new FormData();
   form.set('type', 'knowledge');
   form.set('database', conn.database);
   form.set('upsert', 'true');
   for (const { page, text } of pages) {
-    const title = page.title || page.slug;
+    const title = redactFindings(page.title || page.slug, { highEntropy: true }).text;
     form.append('documents', new Blob([`# ${title}\n\n${text}\n`], { type: 'text/markdown' }), `${title.replace(/[\\/\x00-\x1f]/g, ' ').slice(0, 120)}.md`);
   }
   form.set('document_metadata', JSON.stringify(pages.map(({ page }) => ({
     id: hydraDocId(page.source_id, page.slug),
-    additional_metadata: hydraDocMetadata(page.source_id, page.slug),
+    additional_metadata: hydraDocMetadata(page.source_id, page.slug, page),
   }))));
-  await hydraRequest(conn, 'POST', '/context/ingest', { form });
+  await ingestHydra(conn, form, pages.map(({ page }) => hydraDocId(page.source_id, page.slug)), signal);
 }
 
 async function remove(conn: HydraConnection, refs: PageRef[]): Promise<void> {
   if (!refs.length) return;
-  await hydraRequest(conn, 'DELETE', '/context', {
-    json: { database: conn.database, type: 'knowledge', ids: refs.map((r) => hydraDocId(r.source_id, r.slug)) },
-  });
+  await deleteHydra(conn, refs.map((r) => hydraDocId(r.source_id, r.slug)));
 }
 
 /** Upload each page's projection, or remove the page from the cloud when it projects to nothing. */
-async function sync(engine: BrainEngine, conn: HydraConnection, pages: Page[], report: MirrorReport): Promise<void> {
+async function sync(engine: BrainEngine, conn: HydraConnection, pages: Page[], report: MirrorReport, signal?: AbortSignal): Promise<void> {
   const upserts: Array<{ page: Page; text: string }> = [];
   const removals: PageRef[] = [];
   for (const page of pages) {
-    if (Buffer.byteLength(JSON.stringify(hydraDocMetadata(page.source_id, page.slug))) > MAX_METADATA_BYTES) {
+    if (Buffer.byteLength(JSON.stringify(hydraDocMetadata(page.source_id, page.slug, page))) > MAX_METADATA_BYTES) {
       report.skipped++;
+      removals.push(page);
       continue;
     }
     const text = await projection(engine, page);
     if (text) upserts.push({ page, text });
     else removals.push(page);
   }
-  await ingest(conn, upserts);
+  await ingest(conn, upserts, signal);
   await remove(conn, removals);
   report.upserted += upserts.length;
   report.removed += removals.length;
 }
 
-export async function mirrorBrain(engine: BrainEngine, conn: HydraConnection,
+interface MirrorCursor { updatedAt: string; slug: string; sourceId: string }
+const locks = new WeakMap<BrainEngine, Promise<unknown>>();
+/** Serialize background writes and catch-up so older projections cannot overtake newer ones. */
+export function withCloudLock<T>(engine: BrainEngine, work: () => Promise<T>): Promise<T> {
+  const run = (locks.get(engine) ?? Promise.resolve()).catch(() => undefined).then(work);
+  locks.set(engine, run);
+  void run.finally(() => { if (locks.get(engine) === run) locks.delete(engine); }).catch(() => undefined);
+  return run;
+}
+
+export function mirrorBrain(engine: BrainEngine, conn: HydraConnection,
+  opts: { full?: boolean; progress?: ProgressReporter; signal?: AbortSignal } = {}): Promise<MirrorReport> {
+  return withCloudLock(engine, () => mirror(engine, conn, opts));
+}
+
+async function mirror(engine: BrainEngine, conn: HydraConnection,
   opts: { full?: boolean; progress?: ProgressReporter; signal?: AbortSignal } = {}): Promise<MirrorReport> {
   const report: MirrorReport = { upserted: 0, removed: 0, skipped: 0 };
-  const horizon = horizonIso();
+  const horizon = opts.full ? toMicroIso(new Date().toISOString()) : horizonIso();
 
   const deletedSince = await engine.getConfig(HYDRADB_CONFIG.deletedSince);
   if (deletedSince) {
@@ -115,20 +130,35 @@ export async function mirrorBrain(engine: BrainEngine, conn: HydraConnection,
   await engine.setConfig(HYDRADB_CONFIG.deletedSince, horizon);
 
   const saved = opts.full ? null : await engine.getConfig(HYDRADB_CONFIG.pagesCursor);
-  let cursor = saved ? JSON.parse(saved) as { updatedAt: string; slug: string } : null;
+  const parsed = saved ? JSON.parse(saved) as MirrorCursor : null;
+  // Legacy cursors omitted source identity; replay once instead of skipping a cross-source tie.
+  let cursor = parsed?.sourceId ? parsed : null;
   opts.progress?.start('cloud.mirror');
   for (;;) {
     opts.signal?.throwIfAborted();
-    const pages = await engine.listPages({ ...(cursor ? { updatedAfterKeyset: cursor } : {}), sort: 'updated_asc', limit: BATCH });
-    const due = pages.map((page) => ({ page, at: page.updated_at_iso ?? new Date(page.updated_at).toISOString() }))
-      .filter(({ at }) => toMicroIso(at) <= horizon);
-    if (!due.length) break;
-    await sync(engine, conn, due.map(({ page }) => page), report);
-    const last = due[due.length - 1]!;
-    cursor = { updatedAt: last.at, slug: last.page.slug };
+    const refs = await engine.executeRaw<PageRef & { at: string; archived: boolean }>(
+      `SELECT p.source_id, p.slug, s.archived,
+        to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at
+       FROM pages p JOIN sources s ON s.id = p.source_id
+       WHERE p.deleted_at IS NULL AND p.updated_at <= $1::text::timestamptz
+         ${cursor ? 'AND (p.updated_at, p.slug, p.source_id) > ($2::text::timestamptz, $3::text, $4::text)' : ''}
+       ORDER BY p.updated_at, p.slug, p.source_id LIMIT ${BATCH}`,
+      cursor ? [horizon, cursor.updatedAt, cursor.slug, cursor.sourceId] : [horizon]);
+    if (!refs.length) break;
+    const pages: Page[] = [];
+    const gone: PageRef[] = [];
+    for (const ref of refs) {
+      const page = ref.archived ? null : await engine.getPage(ref.slug, { sourceId: ref.source_id });
+      if (page) pages.push(page); else gone.push(ref);
+    }
+    await sync(engine, conn, pages, report, opts.signal);
+    await remove(conn, gone);
+    report.removed += gone.length;
+    const last = refs[refs.length - 1]!;
+    cursor = { updatedAt: last.at, slug: last.slug, sourceId: last.source_id };
     await engine.setConfig(HYDRADB_CONFIG.pagesCursor, JSON.stringify(cursor));
-    opts.progress?.tick(due.length);
-    if (due.length < pages.length || pages.length < BATCH) break;
+    opts.progress?.tick(refs.length);
+    if (refs.length < BATCH) break;
   }
   opts.progress?.finish(`${report.upserted} mirrored, ${report.removed} removed`);
   await engine.setConfig(HYDRADB_CONFIG.lastPushAt, new Date().toISOString());
@@ -145,9 +175,12 @@ export async function mirrorBrain(engine: BrainEngine, conn: HydraConnection,
 const PUSH_DEBOUNCE_MS = 300;
 const queued = new Map<BrainEngine, { refs: Map<string, PageRef>; timer: ReturnType<typeof setTimeout> }>();
 const pushing = new Set<Promise<void>>();
+const starting = new Set<Promise<void>>();
 
 export function scheduleCloudPush(engine: BrainEngine, ref: PageRef): void {
-  void hasHydraKey().then((has) => { if (has) enqueue(engine, ref); });
+  const start = hasHydraKey().then((has) => { if (has) enqueue(engine, ref); }).catch(() => undefined);
+  starting.add(start);
+  void start.finally(() => starting.delete(start));
 }
 
 function enqueue(engine: BrainEngine, ref: PageRef): void {
@@ -162,7 +195,7 @@ function flushCloudPush(engine: BrainEngine): void {
   if (!entry) return;
   queued.delete(engine);
   clearTimeout(entry.timer);
-  const run = (async () => {
+  const run = withCloudLock(engine, async () => {
     const conn = await resolveHydraConnection(engine);
     if (!conn) return;
     const pages: Page[] = [];
@@ -174,7 +207,7 @@ function flushCloudPush(engine: BrainEngine): void {
     }
     await sync(engine, conn, pages, { upserted: 0, removed: 0, skipped: 0 });
     await remove(conn, gone);
-  })().catch(() => undefined);
+  }).catch(() => undefined);
   pushing.add(run);
   void run.finally(() => pushing.delete(run));
 }
@@ -183,10 +216,17 @@ registerBackgroundWorkDrainer({
   name: 'cloud-push',
   order: 6,
   async drain(timeoutMs, mode) {
-    if (mode === 'exit') for (const engine of [...queued.keys()]) flushCloudPush(engine);
     let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([Promise.allSettled([...pushing]), new Promise((r) => { timer = setTimeout(r, timeoutMs); })]);
+    const drain = async () => {
+      await Promise.allSettled([...starting]);
+      for (const engine of [...queued.keys()]) {
+        if (mode === 'exit') flushCloudPush(engine);
+        else { clearTimeout(queued.get(engine)!.timer); queued.delete(engine); }
+      }
+      await Promise.allSettled([...pushing]);
+    };
+    await Promise.race([drain(), new Promise((r) => { timer = setTimeout(r, timeoutMs); })]);
     clearTimeout(timer);
-    return { unfinished: pushing.size };
+    return { unfinished: pushing.size + starting.size };
   },
 });
