@@ -10,46 +10,239 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.231.0] - 2026-10-14
+## [0.60.242.0] - 2026-10-15
 
-**Choose HydraDB for durable cloud memory, and keep local memory as your fallback.**
-
-You can now connect your brain to HydraDB with `gbrain cloud connect`. Fast retrieval is the default; `gbrain cloud mode thinking` selects thinking mode. Agents receive Markdown context using HydraDB’s SDK formatter, with permitted graph and dated evidence. Natural-language queries,
-search and recall use the cloud even when your brain has no embedding-provider key.
-Pages remain available locally, and turning cloud memory off restores local search.
-Existing gstack context queries use the selected backend.
-
-### How to turn it on
-
-Run `gbrain cloud connect` and review what will be shared. Get an API key from the
-HydraDB dashboard, then follow the prompt. For gstack context loading, set
-`GSTACK_BRAIN_TIMEOUT_MS=10000` in your agent's environment.
-
-| Your choice | What happens |
-| --- | --- |
-| Cloud primary on | HydraDB retrieves and ranks natural-language page searches. |
-| Cloud primary off | Local search resumes; pages still sync to HydraDB. |
-| Disconnect | Cloud sync stops; local memory keeps working. |
-
-Private pages and private fact rows stay local. Detected secrets are redacted from
-outgoing text and titles. Structured record reads, explicit keyword enumeration,
-image similarity and symbol walks keep their existing local contracts.
+**Pages up to 24 MiB are now searchable, and an older brain's skipped large pages come back on upgrade.** Before, any page over 500 KB was stored with `embed_skip` and no chunks, so keyword and vector search never found it. A long chat-log page was the usual victim. The page ceiling is now 24 MiB at every entry point: import, sync, `gbrain put` stdin (was 5 MB) and MCP stdio (was 10 MiB). A page over 1 MiB commits with keyword-searchable chunks and embeds after the write, newest chunks first, under a per-page spend cap of $2 by default (`embed.max_usd_per_page`). `gbrain upgrade` re-indexes the pages an older gbrain skipped for size. That pass makes no model calls and works with embeddings off, and it asks before any embedding spend on pages over 1 MiB.
 
 ### Itemized changes
 
-- Add opt-in cloud connection, status, indexed backfill, write-through syncing and disconnect commands.
-- Route keyless recall and both hybrid search entry points through the selected cloud backend.
-- Preserve source, type, date, slug and pagination filters without running local relevance ranking.
-- Verify per-item ingestion, indexing and deletion outcomes before advancing mirror cursors.
-- Keep page identities distinct across sources and retry interrupted batches.
-- Reconcile archived/restored sources, expand schema type aliases in cloud searches, serialize PostgreSQL uploads across processes, and preserve shared credentials when one brain disconnects.
-- Add an optional staging endpoint and a synthetic live smoke, including gstack CLI context loading.
+- **One ceiling.** `content_sanity.bytes_block` defaults to 24 MiB (was 500 KB). One byte over the ceiling is refused with the limit named. Code files keep their 5 MB limit. An over-ceiling `put_page` or `capture` body is refused as `request_too_large` before it enters the write journal, so it no longer comes back as a retryable `queue_capacity`.
+- **`embed_skip` keeps chunks (#6722).** A page with an `embed_skip` marker, including one over an operator's lower `bytes_block`, stays keyword-searchable and only goes without vectors. It no longer drops to zero chunks. `put_page`, `remember` and sync receipts report a large or skipped page's embedding state as `size_state` (`deferred`, `partial`, `held` or `skipped`). Sync receipts use `size_states`.
+- **Large-page embedding.** A page over 1 MiB embeds after its write through the stale sweep, `gbrain embed` or the post-write job. Its lifetime spend per embedding model stays under `embed.max_usd_per_page`: the default is $2, it's unlimited under `spend.posture tokenmax` when unset, and `off` turns the cap off. Run caps still apply and the lowest cap wins. Before embedding, gbrain samples the page's head, middle and tail and holds a page that looks like markup or junk. The new doctor check `partial_embedding` lists capped or held pages with the approval command (`gbrain embed --held --max-usd N`). Large pages use the free title context tier.
+- **Upgrade backfill.** `gbrain reindex --oversized` (`--dry-run`, `--source`, `--limit`, `--json`) re-chunks pages stored with the old gate-written `embed_skip: oversized` marker. `gbrain upgrade` runs it for up to two minutes, and the command finishes the rest. It removes only that marker and its `content_flag`. `gbrain pages unsearchable` now points at this free command instead of suggesting a lower `bytes_block`.
+- **Doctor `oversized_pages`** honors a `content_sanity.bytes_block` set in the database (#6526). Contributed by @RerankerGuo.
+- **Extraction on long pages.** Fact extraction on a page over 8,000 characters reads the text appended since its last run instead of the first 8,000 characters every time, so messages appended to a long conversation now yield facts. `extract_atoms` reads appended text the same way. `extract-conversation-facts` checks a `raw_transcript` sidecar's size before reading it. A new `page_extraction_state` table records partial reads, and the new doctor check `extraction_input_truncated` reports them.
+- **Storage bounds.** Chunk replacement writes in batches of at most 500 rows and 16 MiB per statement, inside one transaction. A chunk's vector follows its text, so an edit above it no longer drops its embedding. An embed that finishes after the page changed keeps the vectors for chunks that didn't change. A page over 1 MiB keeps its newest 5 large version snapshots. The write journal admits 64 MiB of pending writes per principal (was 32 MiB). Write-through never writes a file over the 25 MiB pre-push secret-scan limit.
+- **`get_chunks`.** When the list is cut, its last chunk carries `truncated: true` and `next_from_index`. The result is still an array.
+- **Schema.** Migrations add `page_embedding_budget` and `page_extraction_state`.
 
-### To take advantage of v0.60.231.0
+## [0.60.241.0] - 2026-10-15
 
-Upgrade GBrain, then run `gbrain cloud connect` if you want HydraDB memory.
-Cloud memory remains off until you explicitly connect. See
-[cloud memory](docs/guides/cloud-memory.md) for setup and off switches.
+**Timing tests that guard CPU-bound work no longer fail on a busy CI machine (tests only, no behavior change).** Tests that bound how long a parser, scanner or redactor may take used to measure wall-clock time, so a loaded runner could fail them without any regression. On a loaded runner `chunker-spans-linear` read 3.50 against its bound of 3. Under 6 busy loops at nice 10, `relational-plan`'s 50 ms bound failed 4 runs of 5. These tests now measure CPU time on the test's own thread, which counts the work rather than how long the scheduler made it wait. The bounds and correctness asserts are unchanged.
+
+### Itemized changes
+
+- **Shared helper** (`test/helpers/cpu-time.ts`): `cpuMs(fn)` times a synchronous call with `process.threadCpuUsage`, the same clock `test/entity-card-perf.slow.test.ts` and `src/core/progress.ts` already use. It leaves out the engine's GC and JIT threads and other work in the process.
+- **30 asserts in 15 files converted:** `fence-marker-code-context`, `search/output-redaction`, `bounded-lead`, `chunker-spans-linear`, `eval-capture-scrub`, `relational-plan`, `attendance-retrieval`, `frontmatter-alias-bomb`, `line-grammar`, `mentions-policy-aliases`, `remote-body`, `timeline-citations`, `cycle-synthesize-verify`, `fence-extraction` and `redos-hardening`. `secret-scan-perf` moves to the shared helper. Thread CPU advances in about 4 ms steps on Linux, so `secret-scan-perf`'s scaling ratio now repeats each timed call until the window holds at least 40 ms.
+- **Three asserts keep process CPU time**, each with its reason in the file:
+  - The `output-redaction` PEM-scan bound and the `secret-scan-perf` repetitive-tail bound. An injected regression that allocated heavily ran about 40% of its cost on GC threads (2151 vs 3582 ms, and 1712 vs 3231 ms) and passed on thread time.
+  - The `line-grammar` ratio that runs in a child process. The 4 ms steps put it anywhere from 3.0 to 7.0 against a bound of 8, and 40 ms windows overran the child's 5 s timeout under load.
+- **Probe results:** every converted assert fails an injected busy-loop regression and an injected allocation regression, then passes 5 of 5 runs under 6 busy loops at nice 10. Before the change, the same load failed `relational-plan` 4/5, three `fence-marker-code-context` bounds 5/5, 4/5 and 3/5, and the `chunker-spans-linear` chat-log ratio 1/5. The other converted asserts did not fail at that load, because their bounds sit 30 to 3000 times above their idle cost.
+- **Left on the wall clock on purpose:** asserts that bound waiting stay as they are. That covers deadlines, timeouts, cancellation, backoff, subprocesses, database and network waits, and lower bounds that prove a wait happened. Asserts that time an awaited span also stay. Of the 164 test files that measure a time difference, 151 have only such asserts. The known residual risk is `line-grammar`'s 5 s child-process timeouts and a set of awaited PGLite spans that guard complexity (`write-gate-perf` p95, `relational-chain-hub`, `traverse-walk-cap`, `sync-delete-batch`, `eval-longmemeval` p50 and others), which need an async-safe measure first.
+
+## [0.60.240.0] - 2026-10-15
+
+**Before a meeting or a reply, your agent can now get a short "Before you start" note with up to three dated things the brain knows about the person (off until you turn it on).** When you tell Claude Code to draft a reply to someone or prepare for a call, it usually starts cold: it doesn't know you promised that person a term sheet last week, or that they changed jobs on Friday. With the brief on, the brain notices that you named a person or company it knows and that the task is a reply or a meeting. It can also see that a meeting with them starts within 12 hours. It then adds at most three dated items, each with the page it came from, ahead of the rest of the context. A prompt that just mentions someone ("what is Alice's title?") gets nothing extra. Nothing changes for anyone who leaves it off.
+
+### How to turn it on
+
+```bash
+gbrain config set context.proactive_brief true    # Claude Code hooks: SessionStart + every prompt
+gbrain config set context.proactive_brief false   # back off on the next turn, no restart
+```
+
+Harnesses without hooks can pull the same note: `context_pack` with `counterparty` (a name or a page slug) and optional `intent` (`meeting` or `reply`).
+
+### What you'd see
+
+| You type | The brain adds |
+|---|---|
+| "Draft a reply to Alice Example about the deck" | `## Before you start` with, for example, `[L12] due 2026-10-16 · open loop: “Send the revised term sheet”` and `[F3401] 2026-10-09 · change: “Moved to Acme Example as CFO”`, each with its source page |
+| A new session, with a 2 pm call with Alice on the calendar | the same note at session start |
+| "What is Alice Example's title?" | nothing extra |
+| "Will you reply to the thread?" | nothing: "Will" is a common word, never a name |
+
+### What to watch for
+
+- **Only shareable items.** Private pages, facts sourced from private pages, and commitments extracted from your email are never pushed. An email commitment shows up only once its fact is made shareable. Remote callers of the pull form get dated facts only, never open loops.
+- **Only fresh items.** Promises with no activity for 90 days are skipped, and so are inboxes and calendars that haven't synced in 24 hours. A sync whose calendar step alone failed still counts as fresh.
+- **Once per session.** An item is not repeated in the same session. A compaction or `/clear` starts over, and a serve restart forgets what was already shown.
+- **Claude Code only, for now.** Codex, OpenCode and thin-client installs don't get the pushed note; use the pull form there.
+
+### Itemized changes
+
+- **Brief assembler** (`src/core/context/proactive-brief.ts`):
+  - **Trigger:** the counterparty must resolve on the alias or title arm at 0.8 or higher, to a person or company page, never through a one-word common name.
+  - **Calendar arm:** a world-visible meeting page, in a google source that synced within 24 h, starts within 12 h and lists one of the counterparty's emails as an attendee.
+  - **Lexicon arm:** the prompt matches a fixed reply/meeting phrase list.
+  - **Items:** at most 3, each up to 600 characters, up to 1,800 characters (and 2,048 bytes) for the block. Stored text is secret-redacted before it is cut and carries its existing trust label.
+- **Hooks** (`src/mcp/resolve-ipc-binding.ts`, `src/mcp/context-pack-handler.ts`): the turn and SessionStart blocks lead with the brief. The usual block is built first, and the brief stops at 300 ms (turn) and 650 ms (session start) after the request arrives.
+- **Repeat suppression:** a per-session ledger, recorded when the block is written (`onContextPackDelivered` is new in `src/core/context/resolve-ipc.ts`), plus a scan of earlier injections in the session.
+- **`context_pack`** (`src/core/ops/facts.ts`, `docs/protocol/MEMORY_VERBS_v1.md`) gains `counterparty` and `intent`. These are additive, advertised on the full tool surface only, and return a structured `brief` field. Without `counterparty` the response is unchanged.
+- **Telemetry:** delivered items log to `context_volunteer_events` under the new channel `brief`, with `match_arm` set to `brief-calendar`, `brief-lexicon` or `brief-session`. No schema change.
+- **Config:** `context.proactive_brief` (DB-plane, default off) is registered in `KNOWN_CONFIG_KEYS`.
+
+### For contributors
+
+- `test/proactive-brief.test.ts` covers:
+  - gate precision (common words, the 0.72 surname arm, a negative prompt);
+  - limits and staleness;
+  - a private-canary fuzz across all four surfaces;
+  - repeat suppression and the pull parameters;
+  - telemetry rows;
+  - default off: `turn_context` is byte-identical to the legacy assembly with the key unset.
+- `isStopword` (`entity-salience.ts`) and `isCommonAliasWord` (`mentions/aliases.ts`) are now exported.
+- The design is in `docs/plans/2026-10-14-001-feat-proactive-brief-d5-plan.md`.
+
+## [0.60.239.0] - 2026-10-15
+
+**The v0.60.218.0 notes now say where a private fact could become world.** Before v0.60.218.0, fencing a legacy fact into a leftover fence row with a different visibility was refused on a managed brain. An unmanaged brain had no such check, so a private fact could be published as world, in the page file and in the database. The `BEHAVIOR_CHANGES` row and `docs/guides/write-refusals.md#fence_unrenderable` claimed the refusal held everywhere; both now describe the two paths. Code is unchanged: v0.60.218.0 already closed the unmanaged path.
+
+### Itemized changes
+
+- **Docs**: the v0.60.218.0 fact-fence row in `src/core/behavior-change-notice.ts` (wording only) and the `fence_unrenderable` entry in `docs/guides/write-refusals.md` name the unmanaged path.
+- **Regression test**: `test/fact-fence-adoption-exits.test.ts` covers an unmanaged brain (PGLite and Postgres): a leftover world cell plus a private legacy fact with the same claim and source keeps the fact private in the file and the database after `extract_facts`. It fails on the build before v0.60.218.0 and passes now.
+- **Flake fix**: the #6007 put_page statement-budget e2e test could count 26 or 27 statements against the preparation budget of 25 on a measured write. The consumer's idle no-op embedding settle pass runs two statements on its own connection (the embedding config read and its effect probe). They normally land before the claim commit; when one lands after it, the classifier counted it as preparation. Both now count as a consumer scan, and only when the probe follows the read on that connection, because write paths share the config read. Budgets are unchanged. A synthetic-trace test fails before the change and passes after.
+
+## [0.60.238.0] - 2026-10-15
+
+**`gbrain status --funnel` shows how far your install has come, from clean install to a week of use. It is off until you turn it on, and nothing leaves your machine.** `gbrain status --funnel --enable` starts recording to `~/.gbrain/funnel.jsonl`, `gbrain status --funnel` (or `--json`) reports the counts, and `--delete` removes the file, which turns recording off. Each line holds an event name, a timestamp and the process start time: no page content, queries, slugs or names. There is no network path, no database table and no migration, and with no file every recorder is a single file-exists check. The secret-scan performance tests also stop failing on busy CI machines: they now time CPU work instead of wall-clock time.
+
+### Itemized changes
+
+- **Funnel stages** (`src/core/funnel.ts`, `src/commands/status-funnel.ts`): the report shows counts, not rates, for six stages. `clean_install` is `gbrain init` creating a new brain. `import_useful_data` is an import or full sync that saves at least one page. `recall_new_session` is a `search`, `query` or `recall` that returns results in a later session than a save, import or correction (counted once per session). `correction_applied` is a committed `remember` that supersedes, or `takes_supersede`. `withdrawal_applied` is `forget` or `forget_fact`. `use_after_seven_days` counts distinct days of activity at least seven days after the clean install, or after enabling the funnel when there was no clean install. Saves and recalls are written once per process, so the file grows with sessions, not calls.
+- **Works anywhere** (`src/cli/main.ts`): `status --funnel` runs before any database connection, so it works before `gbrain init` and on a thin client. Plain `gbrain status` output is unchanged. Guide: `docs/guides/adoption-funnel.md`.
+- **Secret-scan perf tests time CPU work** (`test/secret-scan-perf.test.ts`): a busy CI machine took a 400 ms bound to 409 ms. Each case that guards linear work now times the same input at two sizes 10x apart in the same process, and the larger must cost less than 30x the smaller (linear code reads about 10x, the quadratic forms it guards against about 100x). The echo-pass and `high_entropy_assignment` cases keep their absolute bounds, because their inputs are capped. Every timing is process CPU time, which measures the work rather than how long the scheduler made it wait. Under 6 busy loops at nice 10, the same input pair read 0x to 376x on wall clock and 5x to 18x on CPU time. Correctness asserts are unchanged.
+- **Probe results for the tests:** an injected quadratic in `scanText`, `redactFindings` and `privateKeySpans` fails all 34 converted case patterns, both in the old wall-clock file and the new one. A per-character busy loop fails each of the 7 absolute bounds in both files. Under 6 busy loops at nice 10, the old file failed 5 of 5 runs, on 8 cases including the 10k-row table and the 8 MB-tail echo case. The new file passed 45/45 tests in all 5 runs.
+
+## [0.60.237.0] - 2026-10-15
+
+**Sync, reconcile and repair loops that used to go round forever now end, or tell you exactly what ends them (#6696).** A sync handed to a running `gbrain serve` refused to resume an unfinished run unless you retyped its options, and flags a managed source can't honor failed late with an unrelated error. A run that had finished could still report itself blocked. A wedged migration printed "WEDGED" and then "All migrations up to date". Writes to a page whose file is gone were told to retry a sync that can never import that file. Hundreds of derived pages that disagreed with their files could only be reconciled one at a time. Each of these now finishes, or names the one command that finishes it. And `gbrain doctor --tier ops` now shows what is wrong in seconds on a brain of any size, with anything it could not finish reported as unknown instead of clear.
+
+### How to use it
+
+- Reconcile a whole folder of drifted pages in one preview: `gbrain repair file-drift --source <id> --all-drifted --only 'concepts/**' --prefer database`, then run the apply command it prints.
+- Let the brain's own serve keep derived folders on the database copy: add `keep_db:` under `storage:` in the source's `gbrain.yml` (for example `keep_db: [concepts/]`). It is off until you add it.
+- See whether serve runs an older build than your checkout: `gbrain doctor --only serve_build_drift --json`.
+- Clear a wedged migration after fixing its cause: `gbrain apply-migrations --force-retry <version>`, then `gbrain apply-migrations --yes`.
+- See what is wrong in seconds: `gbrain doctor --tier ops --json` (capacity and forecast, write failures, sync movement, receipt compaction, serve build, schema pack, embedding state) under a 4 s deadline; `--budget-ms <n>` changes it, `--tier deep` runs the full scans.
+- List what search cannot fully see: `gbrain pages unsearchable --source <id> --json`.
+- Find and remove pages whose file is gone: `gbrain pages ghosts --source <id>`, then preview `gbrain repair ghost-pages --source <id>` and run the printed apply after the user agrees.
+- From an agent without admin scope: MCP `get_brain_health` returns the same health as bands; `gbrain doctor --tier ops` from a thin client uses it when the token is not admin.
+
+### What you'd see
+
+| Situation | Before | Now |
+|---|---|---|
+| `gbrain sync` delegated to serve, unfinished run stored `--no-embed` | refused `invalid_params` ("different or unknown processing options") | resumes with the stored options |
+| `--skip-failed` on a managed source | `writer_coordinator_required` after the run started | `managed_sync_flag_refused`, naming the flag, before anything runs |
+| a run whose checkpoint committed, then a long link tail | `blocked` / `no_admission`, "move to port 5432" | `synced` |
+| a migration that ended partial 3+ times, nothing newer ran | "All migrations up to date", exit 0 | `migrations_pending` reason `wedged`, exit 1, fix asks the user |
+| `remember` on a page with an extracted fact row past the fence | `storage_error` | commits at the next free row number |
+| `gbrain doctor` on a large brain | every check ran to completion, minutes with no output | ops sections first; a check past `doctor.entry_budget_ms` (15 s) reports unknown (`reason: budget`) instead of holding the run |
+| `orphan_ratio` above 50,000 pages | a full scan | a sampled estimate marked `estimated`; `--tier deep` scans fully |
+| thin client `gbrain doctor --only persistence_capacity` with a read token | the thin-client connectivity checks, `--only` ignored | the `get_brain_health` capacity band, or `doctor_tier_unavailable` from an older serve |
+
+### Itemized changes
+
+- **Delegated sync options** (`src/commands/sync-delegate.ts`, `src/core/serve-sync-runner.ts`, `src/core/persistence/sync-administration.ts`, `src/core/persistence/sync-authority.ts`): both delegation builders send the list of processing flags you typed exactly as computed, so a flagless delegated resume adopts the unfinished run's stored options. A payload from an older CLI that omits the list counts only its true-valued `noEmbed` / `noExtract` / `noSchemaPack` as typed, so its `--no-embed` is honored; a supplied list is kept as sent, including on the resident-owner lane.
+- **Embedding deferral holds** (`src/commands/sync/run.ts`, `src/core/persistence/sync-prepare.ts`): the cost gate's automatic embedding deferral is a runtime constraint of the run, never a stored option a resume adopts, so resuming a run that stored embedding on no longer embeds over it.
+- **One cursor per source** (`src/core/persistence/sync-cursor-key.ts`): a source with a configured strategy keys its sync cursor the same way for `sync --all`, single-source sync, the cycle and delegated runs. An unfinished cursor under the older key finishes under it first.
+- **Managed-forbidden flags** (`src/core/persistence/managed-sync-flags.ts`): `--skip-failed` and `--include-gitignored` on a managed source refuse with the new `managed_sync_flag_refused` at parse, before the serve socket and in jobs, MCP and the cycle; the fix is the same command without the flag.
+- **Retry text for older failures** (`src/core/persistence/managed-retry-actions.ts`): `gbrain sync --retry-failed` names each failure held under another run's options as resumable (a replay of an unfinished run, or a fresh discovery), safely orphaned (the orphan repair retires it) or unresolved, each with the command that settles it, instead of "with the same options as the failed run (this receipt no longer records them)".
+- **Finished runs end `synced`** (`src/core/persistence/sync-drain.ts`, `drain-step.ts`, `sync-run.ts`): after the checkpoint commits the run stamps drain step `finish` and emits `managed_sync.finish`; link extraction in the tail stops after 5 minutes (the rest stays for `gbrain extract --stale`), and a tail stuck past its own window stops `no_progress` at step `finish`. A run stuck in admission still stops `no_admission`.
+- **Wedged migrations** (`src/commands/apply-migrations.ts`, `src/core/migration-ledger.ts`, `src/commands/upgrade.ts`): a migration with 3+ consecutive partial runs that no newer migration ran past fails `migrations_pending` with reason `wedged` (exit 1, `fix.next: ask_user`, `fix.argv: gbrain apply-migrations --force-retry <v>`, verify `--list --json`). `--list` names it with its clearing command, `--list --json` adds `wedged`, `post-upgrade` exits non-zero and `gbrain upgrade` prints `Migrations: wedged`. A wedge a newer migration already ran past is history, as doctor already treats it, and prints a nothing-to-do note.
+- **Serve build drift** (`src/commands/doctor/checks/persistence-consumers.ts`): new doctor check `serve_build_drift` warns when a live serve or worker on this host runs an older build than this checkout, with the service restart command (`systemctl --user restart gbrain-serve.service` or `launchctl kickstart -k gui/<uid>/com.gbrain.serve`, else the pid) and a verify. It is ok on PGLite and on a fresh brain.
+- **Bulk file drift** (`src/core/repair/file-drift.ts`, `src/core/repair/path-glob.ts`): `gbrain repair file-drift` takes repeatable `--only` / `--skip` over canonical file paths. A value without `*` is an exact path; on file-drift a value with `*` is a glob (`*` within a segment, `**` across). They narrow the selection before the mixed-class check, the bound and the preview, are bound into the preview hash and appear in the printed apply command. `--keep` on file-drift refuses and points at `--prefer database`.
+- **`keep_db` policy** (`src/core/storage-config.ts`, `src/core/repair/keep-db-policy.ts`): an opt-in `storage.keep_db` prefix list. On the source's owner host, the resident serve, jobs or autopilot consumer reconciles drifted pages under those prefixes with the database copy, at most 10 requests every 10 minutes, below the write-quota stop line and never twice for one drift. Doctor `maintenance_write_drift` shows the policy, the pages it matches and their receipt cost. Unknown `storage:` keys now warn.
+- **Slug-conflict repair agrees with sync** (`src/core/repair/slug-conflicts.ts`, `src/core/persistence/sync-screen.ts`, `src/core/persistence/file-repair.ts`): `gbrain repair content` judges a held `frontmatter_slug_conflict` file with the screen managed sync froze it with. A file sync would accept as it is imports unchanged and its hold clears, bound to the hold it read (a newer hold stays, with a retry); a source in a Git subfolder loses its stray `slug:` line; a file sync would hold whatever the repair writes is `slug_page_mismatch`, naming both slugs and the edit.
+- **`remember` row numbers** (`src/core/persistence/memory-prepare.ts`): a remembered fact is numbered past both the page's fence rows and the facts rows recorded for the page, and a collision names the fact holding the row.
+- **Terminal receipts** (`src/core/persistence/terminal-classify.ts`): a write refused because its page's file is missing is category `canonical_file_missing`, whose fix previews `gbrain repair ghost-pages --source <id>`. A `fence_unrenderable` adoption refusal is its own category, historical when written by a build older than 0.60.218.0. `docs/guides/write-refusals.md` tells SQL readers that `error_message` is the short form and that `gbrain sources writer failures` carries the exit.
+- **Doctor tiers and budgets** (`src/commands/doctor/budget.ts`, `registry.ts`, `context.ts`, `src/cli/commands/doctor.ts`): `--tier ops|standard|deep` and `--budget-ms`. The ops sections run first in every tier; `--tier ops` runs only them under one deadline (default 4000 ms) that also bounds each Postgres statement (`executeRaw` `deadlineAt`, re-read after the pool wait). Other tiers bound each check by `doctor.entry_budget_ms` (default 15000). A check that did not finish is a warn with `details.health: "unknown"`, `reason: "budget"` and a rerun-alone fix; the report adds `tier`, `complete`, `unknown_sections`, `elapsed_ms` and `budget_ms` when a tier or budget is given, and every check carries `elapsed_ms`. On PGLite, ops sections that need a Postgres serve read `not_applicable` (info) and the report stays complete. `getHealth` runs once per doctor run.
+- **Ops sections from the persistence checks** (`src/commands/doctor/checks/ops-sections.ts`): `persistence_capacity` (with its forecast) and `persistence_compaction` run as ops sections. The local doctor now also runs `schema_pack_consistency` as an ops section; before, only the remote `run_doctor` report did.
+- **Sampled orphan ratio** (`src/commands/doctor/checks/orphan-estimate.ts`, `graph-health.ts`): above `doctor.orphan_ratio.full_scan_max_pages` (default 50000) `orphan_ratio` estimates from a `TABLESAMPLE` of about 2,000 pages and says so (`estimated: true`, `exact: false`); `--tier deep` scans fully.
+- **Health for agents without admin** (`src/commands/doctor/brain-health-bands.ts`, `src/core/ops/admin.ts`): new read-scope MCP op `get_brain_health` returns capacity as `ok|low|critical` with a days band and write failures, unsearchable chunks and ghost pages as count bands for the caller's readable sources, with no slugs or exact counters, cached 60 s. It is the MCP verify of the capacity and `maintenance_backpressure` fixes (`src/core/persistence/capacity-view.ts`).
+- **Ops tier over MCP and the thin client** (`src/commands/doctor/remote-tier.ts`, `src/core/doctor-remote-tier.ts`): `run_doctor` takes `tier: "ops"` and `only`. A thin client's `gbrain doctor --tier ops` or `--only <check>` uses them when the serve lists them, falls back to `get_brain_health` bands for a read token, and otherwise refuses with the new `doctor_tier_unavailable` (run doctor on the brain host); it never runs the full remote report instead. `/admin/api/ops` serves one ops run a minute (`ops-snapshot.ts`).
+- **Embedding state** (`src/core/embedding-state.ts`, `src/core/engine-sql/chunks.ts`, `src/commands/doctor/checks/embedding-state.ts`): new doctor check `embedding_state` (ops section) counts where indexed text stands against the active embedding column: embedded, pending, keyword-only, quarantined, empty, chunks on deleted pages and chunkless pages. It warns only on chunks of pages soft-deleted more than 72 hours ago and, on a keyed brain, on chunkless pages with body text; on the ops tier it counts only index-backed states and reports `unknown` without a covering index instead of scanning. `get_brain_health` adds the unsearchable count as a band.
+- **`gbrain pages unsearchable`** (`src/commands/pages-unsearchable.ts`): `--source <id> [--state] [--limit] [--json]` lists what search cannot fully see, one row per page and state with its fix; read-only.
+- **Ghost pages** (`src/core/ghost-pages.ts`, `src/commands/doctor/checks/ghost-pages.ts`, `src/commands/pages-ghosts.ts`): one classifier for a live page whose canonical file is gone on the owner host (a stat pre-filter, then `liveFileDrift` reason `canonical_file_missing`). Doctor `ghost_pages` counts them with samples and a fix (ok off the owner host or with no bound source; unknown on unreadable storage); `gbrain pages ghosts --source <id> [--json]` lists them read-only; `get_brain_health` adds them as a band. A write refused for a removed canonical file now carries `detail: canonical_file_missing` (`page-prepare.ts`, `drift-conflicts.ts`).
+- **`gbrain repair ghost-pages`** (`src/core/repair/ghost-pages.ts`): `--source <id>` previews the ghosts and prints the apply command; `--apply --expect <hash> --yes` soft-deletes exactly the previewed set through `delete_page` with the canonical file's absence rechecked in preparation and at publication (a file restored meanwhile is kept and reported `file_restored`). It refuses off the owner host (`not_owner_host`), on unreadable storage (`ghost_storage_unknown`) and past the mass-delete valve (`ghost_mass_delete_refused`), keeps declared `db_only` pages, and without consent exits 3 with nothing changed. `gbrain restore <slug> --force` undoes a removal within the 72-hour purge window.
+
+## [0.60.236.0] - 2026-10-15
+
+**Large pages no longer crash or stall edit_page, parsing, chunking or code indexing, and a long timeline no longer fails the page write (large pages Wave A, crash fixes).** Several steps did work that grew with the square of the page size. On a 1.79 MB chat page (about 30,000 lines), `edit_page`'s receipt diff built a full line-by-line table and ran the process out of memory. Splitting a page that uses `---` separators took 54 s at 4 MB. Chunking newline-free text took 155 s at 10 MB. The code edge extractor took over 200 s on a 10 MB source file. Separately, the page keyword vector indexed the whole timeline, so roughly 1 MB of varied timeline text overflowed Postgres's 1 MB `tsvector` limit and aborted the write. All of these now run in linear time and bounded memory. Every fix produces byte-identical output, proven by differential tests against the old code, except the two bounded behaviors below.
+
+### Itemized changes
+
+- **edit_page receipt diff** (`src/core/persistence/page-edit.ts`, `src/core/skillpack/diff-text.ts`): the diff trims common leading and trailing lines and keeps the line table under 4 million cells. Past that it emits one coarse hunk marked `diff_coarse: true`. `unifiedDiff` output is unchanged for every other caller. Tested on a 50,000-line page under a 3 GB memory cap.
+- **Timeline split** (`src/core/markdown.ts`): the check for content above a `---` or `## Timeline` line is O(1) per line instead of re-joining every line above it. Output is byte-identical, so `content_hash` is unchanged.
+- **Chunker and edge extractor** (`src/core/chunkers/recursive.ts`, `src/core/chunkers/edge-extractor.ts`): `splitAtDelimiters` is covered by a differential test and a scan-count probe. The edge extractor resolves receivers through a lazy per-file binding index and locates chunks by binary search, and emits identical edges.
+- **Bounded page keyword vector** (migration v245, `src/schema.sql`, `src/core/fts-language.ts`): the title arm indexes the first 65,536 characters of the timeline and the first 32,768 characters of timeline entries. The densest worst-case page stays under the 1 MB limit on both engines. The upgrade rebuilds pages with long timelines once.
+
+## [0.60.235.0] - 2026-10-14
+
+**Writes stop failing at the cumulative quota wall (#6696).** A brain running autopilot hit `queue_capacity` on every write once its receipt bytes reached the 1.5 GiB principal cap, because every receipt held a 16 KiB reservation it never gave back and nothing warned before the wall. Receipts are now charged for what they keep, the defaults cover a year at 5,000 writes a day, background work pauses before the wall so your own writes keep working, and doctor, notices and `/metrics` say how many days are left.
+
+### Itemized changes
+
+- **Receipt true-up**: an admission reserves its request body plus 12 KiB (at least 16 KiB), so a 100 KB page reserves its 100 KB; once the last effect settles, `trueUpRequests` gives back what the receipt does not keep (in its own transaction after every settle path: the effect runner, embedding settle, the `embed --stale` bulk settle, effect retry and restore). Receipts compacted earlier give their excess back in one bounded pass.
+- **Defaults and forecast**: principal caps 2,000,000 request ids and 16 GiB receipt bytes (brain 8,000,000 and 64 GiB), from the growth model in `docs/guides/concurrent-writes.md#growth-model`. `persistence_capacity` forecasts days to exhaustion from the full 7-day aggregate on the principal index; warn at 80% or 30 days, fail at 95% or 7 days (`persistence.capacity.warn_days`, `fail_days`).
+- **Clear refusals**: a cumulative cap refuses `write_quota_exhausted` (reason `lifetime_ids` or `terminal_bytes`) with the host's `gbrain config set` raise; `queue_capacity` is only the outstanding-request cap. Background producers pause at `persistence.capacity.background_pause_pct` (80) with `write_capacity_backpressure`.
+- **Warnings**: `[gbrain notice write_capacity_low]` on write and sync receipts (hourly per scope, muteable), sync status and cycle output; `write_capacity_backpressure` notice when the pause starts; admin `/metrics` gauges `gbrain_write_capacity_{used,limit,days_to_exhaustion}` with a documented alert rule.
+- **Sync**: a capacity preflight refuses `write_quota_insufficient` before the first admission; a later cap refusal ends the drain `resumable` / `capacity_paused`.
+- **Compaction**: `gbrain repair receipt-compaction` (explicit-only, preview-bound) compacts on demand, floored at the configured retention unless `--force`; compaction skips open sync runs and the newest sync receipt per worktree; the consumer records each pass (`persistence.maintenance.last_compaction`); doctor adds `persistence_compaction` and `persistence_counter_drift`.
+- **Known-failing writes**: maintenance refuses a page whose canonical file is gone before admission (`canonical_file_missing`) and holds back a write refused three times in a day (`persistence.maintenance.refusal_breaker_threshold`); doctor `maintenance_write_drift` lists them.
+
+## [0.60.234.0] - 2026-10-15
+
+**You can turn query expansion off for a whole brain with one command: `gbrain config set search.expansion false` (docs and tests only, no behavior change).** The setting already worked: `gbrain query` over the CLI, MCP and `gbrain serve --http` all skip the expansion LLM call when a call leaves `expand` unset, and an explicit `--expand` / `expand: true` still expands. It was just not written down where people look. On a 300-question LongMemEval run, expansion added about 1.8 s per query with no measurable quality gain. The init mode picker, the search-modes guide and the install guide now name the command, and say that the brain host sets it (a thin client can't) on gbrain v0.60.188.0 or later.
+
+### Itemized changes
+
+- **Docs** (`src/core/search/mode-advice.ts`, `docs/guides/search-modes.md`, `INSTALL_FOR_AGENTS.md`): the per-brain off switch, how to undo it (`gbrain config unset search.expansion`), and who can set it on a hosted brain.
+- **Tests** (`test/search/operation-expansion-contract.serial.test.ts`): `gbrain config set search.expansion false` followed by CLI-parsed `query` calls: unset expands in `tokenmax`, `false` does not, `false` plus `--expand` does, and unsetting the key restores expansion. `recall` never expands, even with `search.expansion=true`.
+
+## [0.60.233.0] - 2026-10-14
+
+**An autopilot `sync` job on a managed brain now drains its source until it is caught up or its deadline arrives, instead of landing about one page per job (#6706).** On a managed brain each `sync` Minions job ran a single pass: it admitted one page write, waited 5 s for it and returned `partial`. Where a write takes 10-20 s to commit, each freshness job landed about one page and still reported `completed`, so a 10-entry delta took 3 hours while `gbrain sync` drained the same backlog in under 2 minutes. Now the job drains on one lane until the source is synced or its deadline (less a reserve for cleanup) arrives, queues one follow-up job when work is left, and reports its result in the same shape as the CLI. To go back: `gbrain config set sync.job_drain false`. Inline `gbrain jobs work` and supervisor workers need a restart to pick it up.
+
+### Itemized changes
+
+- **The job drains to its deadline** (`src/core/minions/handlers/sync-job-drain.ts`, `src/core/minions/handlers/sync.ts`): the deadline is the job's `timeout_at`, or the queue's wall-clock kill instant for a job without `timeout_ms`, capped at an hour and less `min(60 s, remaining/4)` so git, cleanup and the embed submission finish in time. Embeds are queued once when the job ends, as before.
+- **Bounded drain** (`src/core/persistence/sync-drain.ts`): `runDrain` takes a caller deadline, and the earlier of it and the CLI run deadline wins. A deadline already past makes no pass. A deadline that lands in a retry backoff, a capacity wait or a hung reconnect returns `resumable / deadline` instead of throwing; fatal errors still throw. A pass that ignores the abort is abandoned after 10 s and fenced at its next step.
+- **One drainer per source** (`src/commands/autopilot-dispatch.ts`): freshness dispatch keeps at most one pending sync job per source and skips a source that already has a live sync job. A second managed sync job that starts while another drains its source completes as `skipped: sync_in_progress` with `running_job_id` and a `next` that watches it.
+- **One follow-up job** (`src/core/minions/handlers/sync.ts`): when a drain stops with work left, made progress and is safe to loop, the job queues one continuation (priority 5 or lower, behind waiting embeds, with the parent's `timeout_ms`) and names it in `continuation_job_id`. Only worker-backed brains and trusted submitters get one.
+- **Job results** (`src/core/minions/handlers/sync-job-drain.ts`): a drained job result carries `outcome`, `drain`, `next` and `incomplete`, with `pagesAffected` and `held` trimmed to 50 entries plus counts, and `gbrain jobs get` shows progress while it runs. Results from non-managed brains are unchanged.
+- **Liveness** (`src/core/persistence/sync-movement.ts`, `src/core/persistence/sync-status.ts`): `gbrain sources status` and `writer movement` treat a live sync job as the source's drain (`live.drain_job_id`), and `gbrain sync status` names it in `live_job_id` and points `next` at it instead of starting a second drainer.
+- **Tests:** `test/sync-handler-drain-6706.test.ts` (PGLite and Postgres) holds each write past the 5 s single pass: the previous handler lands no page, the new one lands all four in one job. `test/sync-drain-deadline-6706.test.ts` covers every deadline stop, the abandoned-pass fence and `jobDisposition` per stop reason.
+
+## [0.60.232.0] - 2026-10-14
+
+**MCP `list_write_conflicts` refuses a source outside the caller's grant and bounds its window to that source's own requests (#6643 follow-up).** A remote caller that named a source outside its grant used to get an empty report back. The response's `window` sequences were also brain-wide, so polling one granted source showed write activity in sources the caller cannot see. Both were found by GBRA-60's D5 agent smoke.
+
+### Itemized changes
+
+- **Out-of-grant `source_id`** (`src/core/ops/persistence.ts`): the op checks an explicit `source_id` with `resolveRequestedScope`, like the other source-scoped reads. A remote caller outside its grant gets `permission_denied`, whether or not the source exists.
+- **Source-scoped window** (`src/core/persistence/drift-conflicts.ts`):
+  - The window ends at the source's own newest request in its current incarnation, read through the `(source_incarnation, sequence)` index, and the scan reads only that incarnation.
+  - A cursor naming a later sequence is clamped.
+  - A source the caller may not read returns before anything is computed.
+- **Tests:** `test/maintenance-file-drift-6643.test.ts` covers the refusal for a real and an unregistered source, a window that does not move when another source is written, and the clamped forged cursor. Each half fails on the previous code.
+
+## [0.60.231.0] - 2026-10-14
+
+**Reading a large page no longer pulls the whole page into a response: `get_page` returns an outline and a window, and every remote window is cut from the privacy-sanitized view of the page (large pages Wave A, part 1).** Before, `get_page` of a 100 MB page built a 204 MB JSON-RPC frame. That is over the MCP SDK's 10 MiB stdio limit and far over the 25k tokens a harness accepts. Evidence delivery also read the whole body for every conversation hit: 2 s and +622 MB per hit at 100 MB. Now an MCP client that is not the thin client gets the full body up to the inline threshold, and above it an outline plus the first window with the exact call to read on. Windows, outlines and short leads all slice one projection with withdrawals applied, takes/facts fences stripped and credentials projected. A partial response never fills `compiled_truth`, `timeline` or `content`, so a read followed by a write cannot shrink a page by accident. Another guard backs this up: a remote `put_page` that would cut a large page to under half refuses unless `allow_shrink: true`. Pages up to today's ingest limits read as before through the local CLI and the thin client. The ceiling increase and searchability of large pages come in the next Wave A PR.
+
+### Itemized changes
+
+- **Body modes** (`src/core/ops/get-page-body.ts`, `src/core/page-window/`): `get_page` takes `body: auto|full|none|outline|window` and the selectors `lines`, `bytes` (UTF-8, snapped to code-point and line starts), `around_chunk_id` and a revision-bound `cursor`. A stale cursor returns `revision_changed`, whose fix reads on from the same offset. The default window is 40,000 bytes, measured as the final encoded frame.
+- **Exact chunk spans** (migration v244, `src/core/chunkers/recursive.ts`): `content_chunks.projected_byte_start/end` record each chunk's position in projected UTF-8 coordinates at chunk time. A differential oracle test proves chunk text and indexes are byte-identical to the previous chunker over 160 seeded documents and 6 option sets.
+- **Paging** (`src/core/ops/chunks.ts`, `src/core/ops/admin.ts`, `src/core/ops/read-paging.ts`): `get_chunks` pages 50 rows at a time and returns `total_chunks`. `get_versions` returns the newest 20, metadata only, by default.
+- **fetch and evidence** (`src/core/ops/pages.ts`, `src/core/search/evidence-delivery.ts`): on pages over 256 KB, `fetch` returns the window around the searched chunk with a `next_id` continuation, and the evidence `page` unit becomes a window. Above 1 MiB, hits are placed by stored spans only.
+- **Egress backstop** (`src/core/egress-budget.ts`, `src/mcp/dispatch.ts`): a read result over `mcp.max_result_bytes_stdio` (4 MiB) or `_http` (1 MiB), measured on the final frame, returns `result_too_large` with a fix.
+- **Bounded leads** (`src/core/page-window/bounded-lead.ts`): search snippets, synopses, entity cards and think rows read a 64 KiB prefix through the withdrawal overlay instead of the whole body.
+- **Thin CLI and capability** (`src/cli/page-render.ts`): `gbrain get` pages the round-trip markdown to the end, verifies size and sha256, and never prints a partial body as whole. `get_brain_identity` advertises `large_pages_v1`.
+- **Docs**: new `docs/guides/windowed-reads.md`, plus error-registry entries for `page_too_large_for_inline`, `result_too_large`, `revision_changed` and `page_shrink_refused`.
 
 ## [0.60.230.0] - 2026-10-14
 

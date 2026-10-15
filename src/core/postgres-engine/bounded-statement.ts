@@ -10,17 +10,19 @@
  * wait counts toward it). `COMMIT` after a failed statement is a rollback,
  * never an error of its own. `signal` covers only the wait for a free
  * connection (a saturated pool must not hold the bound off); the statement
- * itself ends at the bound, never by a cancel request.
+ * itself ends at the bound, never by a cancel request. With `deadlineAt` the
+ * bound is the time left after the connection was reserved (#6696 B1).
  */
 import type postgres from '#postgres';
 import { reserveWithCancellation } from './cancellation.ts';
 
 // engine-sql-ok: transaction control around a caller's statement (BEGIN / SET LOCAL statement_timeout / COMMIT), no storage-domain SQL
 export async function runBoundedStatement<T>(conn: ReturnType<typeof postgres>, sql: string, params: unknown[] | undefined,
-  opts: { timeoutMs: number; signal?: AbortSignal }, onReserved: () => void): Promise<T[]> {
-  const ms = Math.max(1, Math.ceil(opts.timeoutMs));
+  opts: { timeoutMs: number; deadlineAt?: number; signal?: AbortSignal }, onReserved: () => void): Promise<T[]> {
   const reserved = opts.signal ? await reserveWithCancellation(reserve => conn.reserve(reserve), opts.signal) : await conn.reserve();
   onReserved();
+  // #6696 B1: an absolute deadline is re-read after the pool wait, so time spent waiting for a connection is not granted again.
+  const ms = Math.max(1, Math.ceil(opts.deadlineAt !== undefined ? Math.min(opts.timeoutMs, opts.deadlineAt - Date.now()) : opts.timeoutMs));
   try {
     const open = reserved.unsafe(`BEGIN; SET LOCAL statement_timeout = ${ms}`).simple().execute();
     const read = reserved.unsafe(sql, params as Parameters<typeof reserved.unsafe>[1], { prepare: true }).execute();

@@ -123,12 +123,20 @@ describe('validateDelegatedSyncOptions', () => {
     expect(validateDelegatedSyncOptions({ sourceId: 'ok-source', timeoutSeconds: 60 }).ok).toBe(true);
   });
 
+  test('#6696 (A5): origin carries the admission origin and rejects anything else', () => {
+    expect(validateDelegatedSyncOptions({ timeoutSeconds: 0, origin: 'interactive' })).toEqual({ ok: true, options: { timeoutSeconds: 0, origin: 'interactive' } });
+    expect(validateDelegatedSyncOptions({ timeoutSeconds: 0, origin: 'background' })).toMatchObject({ ok: true });
+    expect(validateDelegatedSyncOptions({ timeoutSeconds: 0, origin: 'admin' })).toEqual({ ok: false, error: 'invalid_options:origin' });
+    expect(validateDelegatedSyncOptions({ timeoutSeconds: 0, origin: true })).toEqual({ ok: false, error: 'invalid_options:origin' });
+  });
+
   test('field table and options interface stay in lockstep', () => {
     // The validator iterates the table; if a field is added to the interface
     // but not the table it becomes unreachable from the wire — this pin makes
     // that drift loud.
     expect(Object.keys(DELEGATED_SYNC_OPTION_FIELDS).sort()).toEqual([
       'dryRun',
+      'embedDeferred',
       'explicitProcessing',
       'full',
       'includeGitignored',
@@ -138,6 +146,7 @@ describe('validateDelegatedSyncOptions', () => {
       'noExtract',
       'noPull',
       'noSchemaPack',
+      'origin',
       'retryFailed',
       'skipFailed',
       'sourceId',

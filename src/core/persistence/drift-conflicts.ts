@@ -89,6 +89,8 @@ export async function liveFileDrift(engine: BrainEngine, sourceId: string, slug:
   } catch (error) {
     if (!(error instanceof OperationError)) return { still_present: null, reason: 'error' };
     if (error.detail !== 'file_database_drift') {
+      // #6696 (A12): a recorded canonical file that is gone is its own reason; a producer refuses before admission on it.
+      if (error.detail === 'canonical_file_missing') return { still_present: null, reason: 'canonical_file_missing', db_revision: page.revision };
       return { still_present: null, reason: error.code === 'source_changed' ? 'file_missing' : error.code };
     }
     const path = await canonicalFilePath(engine, sourceId, root, page, slug);
@@ -147,6 +149,8 @@ export interface ConflictRow extends Record<string, unknown> {
   last_committed: { request_id?: string; completed_at: string } | null;
   source_path?: string | null;
   git?: { tracked: boolean | null; committed: boolean | null };
+  /** Source-relative path of the canonical file the live check compared (trusted callers on the owner host). */
+  path?: string;
   file_hash?: string;
   db_revision?: string;
   still_present: { value: boolean | null; reason: string };
@@ -179,10 +183,12 @@ function validSlug(slug: string): boolean { try { validateSlug(slug); return tru
 const likeEscape = (value: string) => value.replace(/[\\%_]/g, char => `\\${char}`);
 
 /**
- * Conflict receipts of one source grouped by slug. The rows scanned are the
- * newest `window` request sequences (through the first page's high-water mark,
- * which the cursor carries so later pages read the same window); `complete` is
- * true only when the window reaches the oldest receipt and no slug is left.
+ * Conflict receipts of one source (its current incarnation) grouped by slug. The rows scanned are the
+ * newest `window` request sequences up to the source's own newest request (the
+ * first page's high-water mark, which the cursor carries so later pages read the
+ * same window, never past the source's own newest); `complete` is true only when
+ * the window reaches the source's oldest receipt and no slug is left. A source the
+ * caller may not read, or one not registered, returns the same empty report.
  */
 export async function auditDriftConflicts(engine: BrainEngine, sourceId: string, access: ConflictAuditAccess,
   options: { limit?: number; cursor?: string; window?: number } = {}): Promise<ConflictAuditReport> {
@@ -194,17 +200,26 @@ export async function auditDriftConflicts(engine: BrainEngine, sourceId: string,
       { fix: readFix('Lists the registered sources and their IDs.', { argv: ['gbrain', 'sources', 'list', '--json'] }) });
   }
   const cursor = parseCursor(options.cursor);
-  const [bounds] = await engine.executeRaw<{ top: string | null; bottom: string | null }>(
-    'SELECT (SELECT max(sequence) FROM persistence_requests)::text AS top, (SELECT min(sequence) FROM persistence_requests)::text AS bottom');
-  const through = cursor?.through ?? BigInt(bounds?.top ?? '0');
+  const empty = (): ConflictAuditReport => ({ source_id: sourceId, group_by: 'slug', window: { from_sequence: '0', through_sequence: '0', covers_history: true },
+    conflicts: [], next: null, complete: true, totals: { slugs: 0, receipts: 0, still_present: 0, checked: 0 }, next_actions: [] });
+  // A source this caller may not read reads exactly like an unregistered one, and nothing below is computed for it.
+  if (access.sourceIds && !access.sourceIds.includes(sourceId)) return empty();
+  // The window is bounded by this source's own requests (its current incarnation, the request table's
+  // (source_incarnation, sequence) index), so its sequences never reveal write activity in other sources.
+  const [bounds] = await engine.executeRaw<{ incarnation: string; top: string | null; bottom: string | null }>(
+    `SELECT s.incarnation::text AS incarnation,
+        (SELECT max(r.sequence) FROM persistence_requests r WHERE r.source_incarnation=s.incarnation)::text AS top,
+        (SELECT min(r.sequence) FROM persistence_requests r WHERE r.source_incarnation=s.incarnation)::text AS bottom
+       FROM sources s WHERE s.id=$1`, [sourceId]);
+  if (!bounds) return empty();
+  const top = BigInt(bounds.top ?? '0');
+  const through = cursor && cursor.through < top ? cursor.through : top;
   const floor = through - BigInt(window);
-  const coversHistory = bounds?.bottom == null || BigInt(bounds.bottom) > floor;
-  const report: ConflictAuditReport = { source_id: sourceId, group_by: 'slug',
-    window: { from_sequence: String(floor > 0n ? floor + 1n : 1n), through_sequence: String(through), covers_history: coversHistory },
-    conflicts: [], next: null, complete: false, totals: { slugs: 0, receipts: 0, still_present: 0, checked: 0 }, next_actions: [] };
-  if (access.sourceIds && !access.sourceIds.includes(sourceId)) { report.complete = true; return report; }
-  const params: unknown[] = [sourceId, String(floor), String(through)];
-  const where = [`r.source_id=$1`, `r.sequence > $2::bigint`, `r.sequence <= $3::bigint`, `r.state='conflict'`, `r.error_code='source_changed'`];
+  const coversHistory = bounds.bottom == null || BigInt(bounds.bottom) > floor;
+  const report: ConflictAuditReport = { ...empty(), complete: false,
+    window: { from_sequence: String(floor > 0n ? floor + 1n : 1n), through_sequence: String(through), covers_history: coversHistory } };
+  const params: unknown[] = [sourceId, String(floor), String(through), bounds.incarnation];
+  const where = [`r.source_id=$1`, `r.source_incarnation=$4::uuid`, `r.sequence > $2::bigint`, `r.sequence <= $3::bigint`, `r.state='conflict'`, `r.error_code='source_changed'`];
   const prefixes = access.slugPrefixes?.map(normalizeSlugPrefix).filter(Boolean);
   if (prefixes) {
     if (!prefixes.length) { report.complete = true; return report; }
@@ -261,7 +276,7 @@ export async function auditDriftConflicts(engine: BrainEngine, sourceId: string,
         result.still_present = { value: live.still_present, reason: live.reason };
         if (live.file_hash) result.file_hash = live.file_hash;
         if (live.db_revision) result.db_revision = live.db_revision;
-        if (live.path) result.git = gitState(root, live.path);
+        if (live.path) { result.path = live.path; result.git = gitState(root, live.path); }
         if (live.still_present) {
           report.totals.still_present++;
           result.class = await driftClass(engine, sourceId, row.slug, !page?.source_path && !page?.source_uri);

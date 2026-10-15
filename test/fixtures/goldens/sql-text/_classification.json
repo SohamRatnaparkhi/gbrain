@@ -1,7 +1,7 @@
 {
   "golden": {
     "counts": {
-      "chunks": 14,
+      "chunks": 17,
       "cjk-search": 2,
       "code-edges": 5,
       "facts": 19,
@@ -84,6 +84,7 @@
       "getCalibrationCurve": "takes",
       "getCalleesOf": "code-edges",
       "getCallersOf": "code-edges",
+      "getChunkPage": "chunks",
       "getChunkWindows": "chunks",
       "getChunks": "chunks",
       "getChunksWithEmbeddings": "chunks",
@@ -130,6 +131,7 @@
       "listChunklessPagesWithContent": "chunks",
       "listConfigKeys": "out-of-scope:config",
       "listCorpusSample": "pages",
+      "listEmbeddingStateRows": "chunks",
       "listEnrichCandidates": "salience",
       "listEvalCandidates": "out-of-scope:eval-capture",
       "listEvalCaptureFailures": "out-of-scope:eval-capture",
@@ -162,6 +164,7 @@
       "putDreamVerdict": "out-of-scope:dream-verdicts",
       "putPage": "pages",
       "putRawData": "out-of-scope:raw-data",
+      "readEmbeddingStateCounts": "chunks",
       "readPageSnapshot": "pages",
       "readPageSnapshotsBatch": "pages",
       "reconnect": "out-of-scope:lifecycle (connection, pool, transaction, raw seams)",

@@ -172,7 +172,7 @@ const PARAM_FACTORY: Record<string, Record<string, unknown>> = {
   get_links: { slug: WORLD_PAGE_SLUG },
   get_backlinks: { slug: WORLD_PAGE_SLUG },
   traverse_graph: { slug: WORLD_PAGE_SLUG },
-  get_versions: { slug: WORLD_FENCE_SLUG },
+  get_versions: { slug: WORLD_FENCE_SLUG, include_body: true },
   get_write_attribution: { slug: WORLD_FENCE_SLUG, versions: true },
   get_chunks: { slug: WORLD_FENCE_SLUG },
   resolve_slugs: { partial: 'world-page' },
@@ -304,6 +304,7 @@ const EXPECTED_OUTCOME: Record<string, Outcome> = {
   list_jobs: 'ok', // base unused — per-shape override in EXPECTED_BY_SHAPE (above)
   quarantine_list: 'ok',
   run_doctor: 'ok',
+  get_brain_health: 'ok', // bands only: counts as ranges, no slugs or stored text
   get_ingest_log: 'ok',
   code_callers: 'error',
   code_callees: 'error',

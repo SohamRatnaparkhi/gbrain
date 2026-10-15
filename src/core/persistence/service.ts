@@ -113,6 +113,8 @@ export async function preparePersistedMutation(e: BrainEngine, row: WriteRequest
  * `autopilot`, `mcp`) get a `WaiterOnlyConsumer` that probes the host's consumer rows on its first tick and settles to
  * full or waiter-only (consumer-election.ts). Either way the returned object has the consumer's whole surface.
  */
+/** #6696 C7: the resident owners whose full consumer runs the storage.keep_db policy (never a short-lived command). */
+const KEEP_DB_POLICY_OWNERS = ['serve', 'jobs', 'autopilot'];
 export function startPersistenceConsumer(engine: BrainEngine, config: GBrainConfig): PersistenceConsumerLike {
   const prior = services.get(engine);
   if (prior) {
@@ -123,7 +125,7 @@ export function startPersistenceConsumer(engine: BrainEngine, config: GBrainConf
     return prior.consumer;
   }
   const full = () => new PersistenceConsumer(engine, config, preparePersistedMutation,
-    { drainNotice: claimOwnerKind() === 'serve', onSettled: row => {
+    { drainNotice: claimOwnerKind() === 'serve', keepDbPolicy: KEEP_DB_POLICY_OWNERS.includes(claimOwnerKind()), onSettled: row => {
       recordSettlement(engine); rememberSettled(engine, row.id); for (const listener of settledWaiters.get(engine)?.get(row.id) ?? []) listener(row);
       if (row.state === 'committed' && row.target_kind !== 'skill_bundle') scheduleCloudPush(engine, row);
     } });

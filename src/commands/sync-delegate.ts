@@ -62,6 +62,7 @@ import {
 } from '../core/context/resolve-ipc.ts';
 import {
   DELEGATED_SYNC_LANES_MAX,
+  DELEGATED_SYNC_PROCESSING_KEYS,
   type DelegatedSyncOptions,
   type SyncStartRegistration,
   type SyncStatusResponse,
@@ -145,8 +146,8 @@ export function parseDelegatedSyncArgs(args: string[]): ParsedDelegatedArgs {
     // --all, --watch, --exclude, --workers, …) and anything future.
     return { ok: false, refused: tok };
   }
-  const explicitProcessing = (['noEmbed', 'noExtract', 'noSchemaPack'] as const).filter(key => options[key] === true);
-  if (explicitProcessing.length) options.explicitProcessing = explicitProcessing;
+  // #6696: always sent, so a flagless run adopts an unfinished cursor's options on the serve as it does in-process.
+  options.explicitProcessing = (['noEmbed', 'noExtract', 'noSchemaPack'] as const).filter(key => options[key] === true);
   return { ok: true, options: options as Omit<DelegatedSyncOptions, 'timeoutSeconds'>, explicitSource };
 }
 
@@ -538,6 +539,10 @@ export async function maybeDelegateManagedSyncToServe(engine: BrainEngine, args:
   // 1. Only a managed source has the two-consumer problem; classic sync keeps its own path.
   const { readManagedMode } = await import('../core/persistence/managed-mode.ts');
   if (!await readManagedMode(engine)) return own('not_managed');
+  // #6696 C2: a flag the managed source refuses never reaches the serve; the refusal names it before any probe or socket call.
+  const { managedForbiddenFlag, managedSyncFlagRefusal } = await import('../core/persistence/managed-sync-flags.ts');
+  const forbidden = managedForbiddenFlag(opts);
+  if (forbidden) throw managedSyncFlagRefusal(forbidden, sourceId, args);
   // 2. The owner probe: the B3 heartbeat row, through the database (the persistence socket does not exist on Postgres).
   let owner: ConsumerRow | null;
   try {
@@ -577,10 +582,14 @@ export async function maybeDelegateManagedSyncToServe(engine: BrainEngine, args:
   const hard = await deriveDelegatedTimeoutSeconds(args, { env });
   const timeoutSeconds = soft && soft > 0 ? (hard > 0 ? Math.min(soft, hard) : soft) : hard;
   const options: DelegatedSyncOptions = {
-    sourceId, timeoutSeconds,
+    // #6696 (A5): an operator's sync keeps the capacity background producers leave free.
+    sourceId, timeoutSeconds, origin: 'interactive',
     ...pick(opts, ['dryRun', 'full', 'noPull', 'noEmbed', 'noExtract', 'noSchemaPack', 'skipFailed', 'retryFailed', 'includeGitignored', 'noBulk'] as const),
     ...(opts.lanes !== undefined ? { lanes: opts.lanes } : {}),
-    ...(opts.explicitProcessing?.length ? { explicitProcessing: [...opts.explicitProcessing] } : {}),
+    // #6696: an empty list crosses the wire (a flagless run adopts the cursor's options); a caller that set none is strict, as in-process.
+    explicitProcessing: [...opts.explicitProcessing ?? DELEGATED_SYNC_PROCESSING_KEYS],
+    // Sent only when set, so a serve that predates the field keeps accepting every run without a deferral.
+    ...(opts.embedDeferred ? { embedDeferred: true } : {}),
   };
   const clientToken = randomUUID();
   const { probeLiveFullConsumer, consumerIdentity } = await import('../core/persistence/consumer-heartbeat.ts');

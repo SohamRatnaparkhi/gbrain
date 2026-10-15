@@ -94,6 +94,8 @@ export interface Declaration { alias: string; line: number; selfCode?: true }
 
 const isQuarter = (t: string) => /^(?:q[1-4]|h[12]|fy\d{2,4})$/i.test(t);
 const isCommon = (t: string) => COMMON_WORDS.has(t.toLowerCase()) || isQuarter(t);
+/** True for the department, calendar and quarter words a derived alias may never be. */
+export const isCommonAliasWord = isCommon;
 const isNameToken = (t: string) => /^[A-Z][A-Za-z0-9&.\u2019'-]*$/.test(t) || (/^[0-9][A-Za-z0-9&.-]*$/.test(t) && /[A-Z]/.test(t));
 const POSSESSIVE_RE = /['\u2019]s$/;
 

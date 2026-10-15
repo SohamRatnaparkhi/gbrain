@@ -1,4 +1,5 @@
 import { pageMutationSource, submitPageMutation, validateMutationSlug } from '../persistence/page-mutations.ts';
+import { funnelPassThrough } from '../funnel.ts';
 import { suffixedSlugDryRun } from '../persistence/suffixed-slug.ts';
 import { AGENT_CONTENT_PARAMS, PAGE_MUTATION_PARAMS, CAPTURE_EVENT_PARAMS, CAPTURE_CLI_PROVENANCE_PARAMS, WRITE_WAIT_PARAM } from '../persistence/params.ts';
 import { assertPurgeParams } from '../persistence/purge-params.ts';
@@ -13,10 +14,12 @@ import { assertPurgeParams } from '../persistence/purge-params.ts';
 
 import { clampSearchLimit, type BrainEngine } from '../engine.ts';
 import type { Page } from '../types.ts';
-import { decodeDeepResearchId, deepResearchPageUrl } from '../deep-research-id.ts';
+import { decodeDeepResearchAnchor, decodeDeepResearchId, deepResearchPageUrl } from '../deep-research-id.ts';
 import { PageSnapshotAmbiguousError, type PageSnapshot } from '../page-state/types.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
 import { pageTrustForRead, projectFetchText, projectGetPage, readQuarantined } from './get-page-projection.ts';
+import { assertLargePageAdmission } from '../persistence/large-page-guard.ts';
+import { assertFullReadFits, bodyBytes, fetchWindowResult, GET_PAGE_BODY_PARAMS, inlineBodyBytes, parseBodyRequest, readPartialBody } from './get-page-body.ts';
 import { MIN_TRUST_PARAM } from '../eligibility/policy.ts';
 import { stampRowTrust } from '../eligibility/stamp.ts';
 import { isAutoLinkEnabled } from '../link-extraction.ts';
@@ -84,14 +87,15 @@ const get_page: Operation = {
   name: 'get_page',
   idempotent: true,
   outputRedaction: { exempt: 'explicit page read by slug/id; governed by page visibility, not output redaction (CEO-17 raw-read exception)' },
-  description: 'Read a page by slug. To edit, pass include_content:true and send `content` to put_page, or use edit_page.',
+  description: 'Read a page by slug. To edit: include_content:true, send `content` to put_page; or edit_page. >256 KB: outline+window, then `next`.',
   params: {
     slug: { type: 'string', description: 'Page slug.', required: true },
     fuzzy: { type: 'boolean', description: 'Fuzzy slug match.' },
-    include_content: { type: 'boolean', description: 'Full markdown + revision, for editing.' },
+    include_content: { type: 'boolean', description: 'Markdown + revision, to edit.' },
     content_only: { type: 'boolean', description: 'Round-trip fields only.' },
-    include_deleted: { type: 'boolean', description: 'Include soft-deleted pages.' },
-    include_timeline_entries: { type: 'boolean', description: 'Also return timeline rows.' },
+    ...GET_PAGE_BODY_PARAMS,
+    include_deleted: { type: 'boolean', description: 'Soft-deleted too.' },
+    include_timeline_entries: { type: 'boolean', description: 'Timeline rows too.' },
     grammar_diagnostics: { type: 'boolean', description: 'Also return every line-grammar finding for the page.', fullSurfaceOnly: true },
     source_id: { type: 'string', description: "One source, or '__all__'." },
     include_quarantined: { type: 'boolean', description: 'Admin: quarantined body.' },
@@ -101,7 +105,10 @@ const get_page: Operation = {
     const slug = p.slug as string;
     const fuzzy = (p.fuzzy as boolean) || false;
     const includeDeleted = (p.include_deleted as boolean) === true;
-    const includeContent = (p.include_content as boolean) === true;
+    // Large pages: resolve the body mode first, so a malformed selector fails before any read.
+    const bodyRequest = parseBodyRequest(ctx, p);
+    const contentOnly = p.content_only === true;
+    const includeContent = p.include_content === true;
     const includeTimelineEntries = (p.include_timeline_entries as boolean) === true;
     // #4329: honor a per-call source_id (pre-fix it was silently dropped).
     // resolveRequestedScope (inside federatedSearchScope) enforces the remote
@@ -212,11 +219,21 @@ const get_page: Operation = {
     // Read-only, over the same visibility-filtered body the reader gets.
     const lineGrammar = p.grammar_diagnostics === true ? await (await import('../line-grammar-report.ts')).lineGrammarReport(ctx.engine, { slug: page.slug, sourceId: page.source_id, body: visibleBody.compiled_truth }) : undefined;
     const quarantined = readQuarantined(ctx, page, p.include_quarantined === true); // #6259
+    const fileHeld = held ? { file_held: fileHeldField(held, isUntrustedReader) } : {};
+    const whole = bodyRequest.mode === 'full'
+      || (bodyRequest.mode === 'auto' && bodyBytes(visibleBody) <= await inlineBodyBytes(ctx));
+    if (!whole) {
+      const partial = await readPartialBody(ctx, { page, visibleBody, revision: snapshot!.revision, tags, quarantined, trust: readable.trust,
+        extras: { ...(quarantined ? { quarantined } : {}), ...(timelineEntries ? { timeline_entries: timelineEntries } : {}), ...fileHeld,
+          ...(resolved_slug ? { resolved_slug } : {}), ...(content_flag ? { content_flag } : {}) } }, bodyRequest);
+      return lineGrammar ? { ...partial, line_grammar: lineGrammar } : partial;
+    }
     const projected = projectGetPage(visibleBody, {
-      revision: snapshot!.revision, tags, includeContent, contentOnly: (p.content_only as boolean) === true, resolved_slug, content_flag, quarantined, trust: readable.trust,
+      revision: snapshot!.revision, tags, includeContent, contentOnly, resolved_slug, content_flag, quarantined, trust: readable.trust,
       ...(timelineEntries ? { timeline_entries: timelineEntries } : {}),
-      ...(held ? { file_held: fileHeldField(held, isUntrustedReader) } : {}),
+      ...fileHeld,
     });
+    if (ctx.remote !== false) await assertFullReadFits(ctx, visibleBody, projected, bodyRequest);
     return lineGrammar ? { ...projected, line_grammar: lineGrammar } : projected;
   },
   scope: 'read', mutating: false,
@@ -227,7 +244,7 @@ const fetch_page: Operation = {
   name: 'fetch',
   idempotent: true,
   outputRedaction: { exempt: 'explicit page read by slug/id; governed by page visibility, not output redaction (CEO-17 raw-read exception)' },
-  description: "Fetch the full text of one search result by its opaque, source-qualified `id` (OpenAI deep-research contract: the search/fetch pair). Pass the id unchanged; it does not grant access. Legacy slug ids work only when unambiguous within your current read scope. Returns { id, title, text, url, metadata } — `text` is the page's canonical markdown. For fuzzy slugs, soft-delete recovery, or lossless edit round-trips, use get_page.",
+  description: "Fetch the full text of one search result by its opaque, source-qualified `id` (OpenAI deep-research contract: the search/fetch pair). Pass the id unchanged; it does not grant access. Legacy slug ids work only when unambiguous within your current read scope. Returns { id, title, text, url, metadata } — `text` is the page's canonical markdown; a page over 256 KB returns the window around the searched chunk instead, with metadata.total_bytes and metadata.next_id (fetch it to read on). For fuzzy slugs, soft-delete recovery, or lossless edit round-trips, use get_page.",
   params: {
     id: { type: 'string', required: true, description: 'Opaque result id from a prior `search` call. Pass unchanged. Unambiguous legacy slugs are also accepted.' },
     include_quarantined: { type: 'boolean', description: 'Admin: quarantined body.' },
@@ -277,6 +294,9 @@ const fetch_page: Operation = {
     // Same boundaries as get_page: untrusted readers never see takes or private facts fences, nor a quarantined body (#6259).
     const visibleBody = ctx.remote === false ? page : stripPrivacyFencesForRemoteReader(page);
     const quarantined = readQuarantined(ctx, page, p.include_quarantined === true);
+    if (ctx.remote !== false && !quarantined?.body_omitted && bodyBytes(visibleBody) > await inlineBodyBytes(ctx)) {
+      return fetchWindowResult(ctx, { page, visibleBody: visibleBody as Page, revision: snapshot!.revision, tags, quarantined, trust: readable.trust, extras: {} }, id, identity ? decodeDeepResearchAnchor(id) : null);
+    }
     return {
       id: identity ? id : page.slug,
       title: page.title,
@@ -307,6 +327,7 @@ const put_page: Operation = {
     slug: { type: 'string', description: 'Page slug.', required: true },
     content: { type: 'string', required: true, description: 'Complete markdown (get_page include_content:true).' },
     allow_empty: { type: 'boolean', required: false, description: 'Allow emptying the page.' },
+    allow_shrink: { type: 'boolean', required: false, description: 'Allow content under half a >256 KB page.', fullSurfaceOnly: true },
     drop_timeline: { type: 'boolean', required: false, description: 'No Timeline in content: delete its entries.' },
     wait_ms: WRITE_WAIT_PARAM,
     // v0.39.3.0 provenance write-through (WARN-8 + A1 + CV6). Optional fields
@@ -332,7 +353,8 @@ const put_page: Operation = {
       }
       return { dry_run: true, action: 'put_page', slug: p.slug };
     }
-    return submitPageMutation(ctx, { operation: 'put_page', params: p }).catch(error => rethrowNamingRevisionSource(ctx, sourceId, p, error));
+    if (ctx.remote !== false && typeof p.slug === 'string') await assertLargePageAdmission(ctx.engine, p.slug, sourceId, p);
+    return submitPageMutation(ctx, { operation: 'put_page', params: p }).then(funnelPassThrough('save')).catch(error => rethrowNamingRevisionSource(ctx, sourceId, p, error));
   },
   cliHints: { name: 'put', positional: ['slug'], stdin: 'content' },
 };

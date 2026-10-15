@@ -110,6 +110,7 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'embedding_provider',
   // #5691: query-instruction advisory for instruction-style embedding models.
   'embedding_query_prefix',
+  'embedding_state',
   'embedding_width_consistency',
   'embeddings',
   'entity_link_coverage',
@@ -118,6 +119,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   // #6325: managed atom origins held after repeated extraction failures.
   'extract_atoms_held_failed',
   'extract_health',
+  // Large pages A7: page extractions that read only part of their input.
+  'extraction_input_truncated',
   'facts_embedding_width_consistency',
   'facts_extraction_health',
   'facts_health',
@@ -149,6 +152,7 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'orphan_ratio',
   'oversized_pages',
   'parked_effects',
+  'partial_embedding',
   'pglite_scratch_probe',
   'quarantined_pages',
   'raw_provenance',
@@ -184,6 +188,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   // #5254 — pages written database-only to a source with no canonical owner.
   'unbound_source',
   'undeclared_db_only_pages',
+  // #6696 B5: live pages whose canonical file is missing on the owner host (doctor/checks/ghost-pages.ts).
+  'ghost_pages',
   'unified_multimodal_coverage',
   'unverified_extractions',
   'voice_gate_health',
@@ -257,6 +263,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'oauth_confidential_client_health',
   'orphan_clones',
   'persistence_capacity',
+  'persistence_compaction',
+  'persistence_counter_drift',
   'worktree_refresh_stuck',
   'managed_guard_schema_drift',
   'publication_refusals',
@@ -274,6 +282,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'two_consumers_on_host',
   'consumers_without_heartbeat',
   'host_identity_mismatch',
+  // #6696 C6: a live serve or worker on an older build than this checkout (doctor/checks/persistence-consumers.ts).
+  'serve_build_drift',
   'stale_embedding_effects',
   'vector_plan',
   'keyword_plan',

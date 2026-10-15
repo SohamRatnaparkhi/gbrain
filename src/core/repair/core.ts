@@ -19,6 +19,7 @@
  * full scan (a run with no stored cursor, which every completed run leaves
  * behind) does, the same way a `revision_conflict` item is retried.
  */
+import { withAdmissionOrigin } from '../persistence/admission-origin.ts';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import type { OperationContext } from '../ops/contract.ts';
@@ -34,8 +35,9 @@ import { redactConnectionInfo } from '../audit/redact-connection-info.ts';
 import type { RepairKindSpec } from './registry.ts';
 import { acceptedPendingReceipt } from '../persistence/accepted-pending.ts';
 import { repairAdmissionWindow, repairPublicationOwner, settleRepairReceipts, type PendingRepair } from './settle.ts';
+import { RECEIPT_RESERVATION_FLOOR } from '../persistence/receipt-bytes.ts';
 
-export const REPAIR_KINDS = ['timeline', 'visibility', 'safe-chunks', 'contextual-mode', 'connector-checkpoints', 'request-indexes', 'connector-fences', 'take-supersession', 'orphan-bindings', 'embedding-effects', 'attribution-backfill', 'planner-stats', 'google-file-modes', 'stale-atoms', 'extractor-facts', 'conversation-labels', 'captured-facts', 'loop-facts', 'ontology-facts', 'orphan-children', 'failed-writes', 'frontmatter', 'fences', 'slug-conflicts', 'timeline-comments', 'managed-sync-orphans', 'frontmatter-keys', 'file-drift', 'stuck-recovery'] as const;
+export const REPAIR_KINDS = ['timeline', 'visibility', 'safe-chunks', 'contextual-mode', 'connector-checkpoints', 'request-indexes', 'connector-fences', 'take-supersession', 'orphan-bindings', 'embedding-effects', 'attribution-backfill', 'planner-stats', 'google-file-modes', 'stale-atoms', 'extractor-facts', 'conversation-labels', 'captured-facts', 'loop-facts', 'ontology-facts', 'orphan-children', 'failed-writes', 'frontmatter', 'fences', 'slug-conflicts', 'timeline-comments', 'managed-sync-orphans', 'frontmatter-keys', 'file-drift', 'stuck-recovery', 'ghost-pages', 'receipt-compaction'] as const;
 export type RepairKind = typeof REPAIR_KINDS[number];
 
 export interface RepairScope { brain_id: string; source_ids: string[] }
@@ -90,7 +92,9 @@ export interface RepairPlanOptions { apply: boolean; expect?: string; includeAmb
   /** `file-drift` (#6643): the side that wins, conflict receipt ids, every still-drifted page, and the one drift class kept. */
   prefer?: 'file' | 'database'; requests?: string[]; allDrifted?: boolean; driftClass?: string;
   /** `stuck-recovery`: the version an apply keeps, and the one request a run selects. */
-  keep?: 'prior' | 'disk'; requestId?: string }
+  keep?: 'prior' | 'disk'; requestId?: string;
+  /** `receipt-compaction` (#6696 A9): the age (`72h`, `30d`), failures too, and compaction inside the retention window. */
+  olderThan?: string; includeFailures?: boolean; force?: boolean }
 
 export interface RepairHandler {
   kind: RepairKind;
@@ -177,7 +181,6 @@ export interface RepairResult {
   details?: Record<string, unknown>;
 }
 
-const RECEIPT_BYTES = 16_384;
 const STOP_RATIO = 0.9;
 const SAMPLE = 10;
 
@@ -212,8 +215,8 @@ async function writeCursor(engine: BrainEngine, kind: RepairKind, scope: RepairS
   [fingerprint(kind, scope, approval), JSON.stringify([{ kind, scope, cursor, run_id: runId }])]);
 }
 
-/** Cumulative journal counters this repair's admissions consume, with their 90% stop line. */
-async function capacity(ctx: OperationContext) {
+/** Cumulative journal counters this repair's admissions consume, with their 90% stop line (also the keep_db policy's headroom gate). */
+export async function capacity(ctx: OperationContext) {
   // A dry run never registers a writer; an unregistered installation has consumed nothing yet.
   const principal = await requestPrincipalForContext(ctx).then(principalKey, () => 'principal:unregistered');
   const limits = await readJournalLimits(ctx.engine);
@@ -271,10 +274,16 @@ export async function runRepair(ctx: OperationContext, handler: RepairHandler, s
   opts: { apply: boolean; limit?: number; embeddingModel?: string; sourceFlag?: string; embed?: boolean; applyArgs?: string[];
     explicit?: boolean; expect?: string; includeAmbiguous?: boolean; only?: string[]; skip?: string[]; slugs?: string[]; noLlm?: boolean;
     prefer?: 'file' | 'database'; requests?: string[]; allDrifted?: boolean; driftClass?: string;
-    keep?: 'prior' | 'disk'; requestId?: string;
+    keep?: 'prior' | 'disk'; requestId?: string; olderThan?: string; includeFailures?: boolean; force?: boolean;
     spec?: Pick<RepairKindSpec, 'explicit_only' | 'consent' | 'spends'>; maxLlmUsd?: number; deadline?: number; now?: () => number;
     /** Test seam: who publishes this run's admissions (default: this process's consumer, else a live full one on this host). */
     publicationOwner?: () => Promise<{ alive: boolean; owner: string }> }): Promise<RepairResult> {
+  // #6696 (A5): an approved local repair is the operator's own write; a maintenance cycle's background scope still wins.
+  return withAdmissionOrigin('interactive', () => runRepairScoped(ctx, handler, scope, opts));
+}
+
+async function runRepairScoped(ctx: OperationContext, handler: RepairHandler, scope: RepairScope,
+  opts: Parameters<typeof runRepair>[3]): Promise<RepairResult> {
   const { repairSpec, explicitKindRequired } = await import('./registry.ts');
   const spec = opts.spec ?? repairSpec(handler.kind);
   if (spec?.explicit_only && opts.explicit !== true) throw explicitKindRequired(handler.kind);
@@ -286,7 +295,8 @@ export async function runRepair(ctx: OperationContext, handler: RepairHandler, s
     ...(opts.deadline !== undefined ? { deadline: opts.deadline } : {}), remote: ctx.remote !== false,
     ...(opts.prefer ? { prefer: opts.prefer } : {}), ...(opts.requests?.length ? { requests: opts.requests } : {}),
     ...(opts.allDrifted ? { allDrifted: true } : {}), ...(opts.driftClass ? { driftClass: opts.driftClass } : {}),
-    ...(opts.keep ? { keep: opts.keep } : {}), ...(opts.requestId ? { requestId: opts.requestId } : {}) };
+    ...(opts.keep ? { keep: opts.keep } : {}), ...(opts.requestId ? { requestId: opts.requestId } : {}),
+    ...(opts.olderThan ? { olderThan: opts.olderThan } : {}), ...(opts.includeFailures ? { includeFailures: true } : {}), ...(opts.force ? { force: true } : {}) };
   const plan = await handler.plan(ctx.engine, scope, resumed, planOpts);
   const pending = opts.limit !== undefined ? plan.items.slice(0, opts.limit) : plan.items;
   const counters = await capacity(ctx);
@@ -299,7 +309,7 @@ export async function runRepair(ctx: OperationContext, handler: RepairHandler, s
   const result: RepairResult = {
     kind: handler.kind, mode: opts.apply ? 'apply' : 'dry_run', scope, affected: plan.items.length,
     sample: plan.items.slice(0, SAMPLE).map(item => `${item.source_id}:${item.slug}`), residuals: plan.residuals,
-    cost: { lifetime_ids: admits, receipt_bytes: admits * RECEIPT_BYTES, embedding_pages: handler.embeds === false ? 0 : pending.length,
+    cost: { lifetime_ids: admits, receipt_bytes: admits * RECEIPT_RESERVATION_FLOOR, embedding_pages: handler.embeds === false ? 0 : pending.length,
       embedding_usd: embeddingUsd(pending.reduce((sum, item) => sum + item.chars, 0), opts.embeddingModel),
       ...(llm ? { llm_usd: opts.apply || !plan.llm ? 0 : plan.llm.usd === null ? null
         : pending.some(item => item.llm_usd !== undefined) ? pending.reduce((sum, item) => sum + (item.llm_usd ?? 0), 0) : plan.llm.usd,
@@ -381,9 +391,9 @@ export async function runRepair(ctx: OperationContext, handler: RepairHandler, s
         + `${llmSpent >= opts.maxLlmUsd! ? 'is used up' : `cannot cover its estimate ($${item.llm_usd!.toFixed(4)})`} `
         + `($${llmSpent.toFixed(4)} spent of $${opts.maxLlmUsd!.toFixed(4)}; ${remaining} item(s) still pending). Rerun \`${result.apply_command}\` to resume.` });
     }
-    const full = admits ? (await capacity(ctx)).find(c => c.used + (c.resource === 'lifetime_ids' ? 1 : RECEIPT_BYTES) > c.stop_at) : undefined;
+    const full = admits ? (await capacity(ctx)).find(c => c.used + (c.resource === 'lifetime_ids' ? 1 : RECEIPT_RESERVATION_FLOOR) > c.stop_at) : undefined;
     if (full) {
-      const perItem = full.resource === 'lifetime_ids' ? 1 : RECEIPT_BYTES;
+      const perItem = full.resource === 'lifetime_ids' ? 1 : RECEIPT_RESERVATION_FLOOR;
       const needed = Math.ceil((full.used + remaining * perItem) / STOP_RATIO) + 1;
       return stopAfterSettle({ reason: 'capacity', message: `Stopped before crossing 90% of ${full.scope} ${full.resource} (${full.used} of ${full.limit} used; `
         + `${remaining} item(s) still need ${remaining * perItem} more). Run: gbrain config set ${full.config_key} ${needed} — then rerun \`${result.apply_command}\` to resume.` });

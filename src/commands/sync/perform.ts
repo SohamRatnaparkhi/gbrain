@@ -63,7 +63,10 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
       : await (await import('../../core/persistence/sync-run.ts')).performManagedSync(engine, opts);
     // #6349: a delta past the cursor bound syncs in stages; a drain takes the next stage from where the last one landed
     // until it reaches HEAD (each stage freezes its own bounded manifest, and a stop resumes at the stored cursor).
+    const { deadlinePassed } = await import('../../core/persistence/sync-drain.ts');
     while (opts.drain && result.staged && result.drain?.outcome === 'synced' && !opts.dryRun && !opts.signal?.aborted) {
+      // #6706: a caller deadline ends the catch-up between stages; the stage that landed is kept and the next run takes the next one.
+      if (deadlinePassed(opts.deadlineAtMs)) { result = { ...result, drain: { ...result.drain, outcome: 'resumable', stop_reason: 'deadline' } }; break; }
       serr(result.staged.slice
         ? `[sync] sliced catch-up: committed the ${result.staged.slice.phase} slice of ${result.staged.target.slice(0, 12)} through ${result.staged.slice.after ?? '(start)'} (the target exceeds the cursor bound); taking the next slice.`
         : `[sync] staged catch-up: synced to ${result.staged.target.slice(0, 12)}, short of HEAD ${result.staged.head.slice(0, 12)} (the delta exceeds the cursor bound); taking the next stage.`);

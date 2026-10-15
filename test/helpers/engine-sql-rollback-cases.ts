@@ -14,6 +14,7 @@
  * connect time) makes the write commit outside the transaction and fails.
  */
 import { expect, test } from 'bun:test';
+import { ROW_BATCH_MAX_ROWS } from '../../src/core/batch-rows.ts';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { invalidateStaleSignatureEmbeddingsGuarded } from '../../src/core/embedding-invalidation.ts';
 import { reconcileContextualEmbeddingInputs } from '../../src/core/page-state/contextual-proof.ts';
@@ -141,6 +142,20 @@ export const ROLLBACK_CASES: RollbackCase[] = [
     },
     async write(tx) {
       await tx.upsertChunks(SLUG, [{ chunk_index: 0, chunk_text: 'rolled-back chunk', chunk_source: 'compiled_truth' }]);
+    },
+    observe: chunkTexts,
+  },
+  {
+    // A3: a replacement larger than one row batch commits as several INSERTs
+    // after one prune; all of them leave with the transaction.
+    domain: 'chunks (upsertChunks, several row batches)',
+    async seed(engine) {
+      await seedPage(engine);
+      await engine.upsertChunks(SLUG, [{ chunk_index: 0, chunk_text: 'seeded chunk', chunk_source: 'compiled_truth' }]);
+    },
+    async write(tx) {
+      await tx.upsertChunks(SLUG, Array.from({ length: ROW_BATCH_MAX_ROWS * 2 + 1 }, (_, i) => ({
+        chunk_index: i, chunk_text: `rolled-back chunk ${i}`, chunk_source: 'compiled_truth' as const })));
     },
     observe: chunkTexts,
   },

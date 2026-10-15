@@ -104,6 +104,8 @@ const ROWS: readonly Row[] = [
   ['op_checkpoints', 'out_of_scope', 'no_memory_text', 'op fingerprint completed_keys'],
   ['open_loops', 'swept', 'open_loops', 'source_id dedup_key loop_type counterparty_slug counterparty_source_id counterparty_email summary evidence thread_id page_slug status detector closed_by'],
   ['page_aliases', 'out_of_scope', 'probed_reported', 'source_id alias_norm slug origin alias_text', 'alias_text'],
+  ['page_embedding_budget', 'out_of_scope', 'no_memory_text', 'state reason embedding_signature'],
+  ['page_extraction_state', 'out_of_scope', 'no_memory_text', 'pipeline watermark_sha256 input_truncated'],
   ['page_facts_reconcile', 'out_of_scope', 'no_memory_text', 'outcome'],
   ['page_mention_state', 'out_of_scope', 'no_memory_text', 'source_id'],
   ['page_projection_jobs', 'out_of_scope', 'no_memory_text', 'slug reason'],

@@ -41,7 +41,7 @@ import { isCallable, publishGatesFromDisabled } from '../core/ops/callable.ts';
 import type { AuthInfo } from '../core/operations.ts';
 import { VERSION } from '../version.ts';
 import { dispatchToolCall, requestLogStatusForResult, errorResult } from './dispatch.ts';
-import { GBRAIN_CLIENT_HEADER, resolveResultRowsMode, resultRowsForRequest } from './result-rows.ts';
+import { GBRAIN_CLIENT_HEADER, isGbrainThinClient, resolveResultRowsMode, resultRowsForRequest } from './result-rows.ts';
 import { parseStrictParamsMode } from './validate-params.ts';
 import { filterOpsForSurface, clampSurface, advertisedOps, resolveAdvertisedSurface, type McpSurface } from './surface.ts';
 import { disabledOpsForPublishGates } from './publish-gates.ts';
@@ -59,9 +59,9 @@ export { parseLegacyTokenScope } from '../core/legacy-token-scope.ts';
 
 const DEFAULT_BODY_CAP = 1024 * 1024; // 1 MiB
 
-/** #6007: what an agent does after a 413: nothing was processed, so split the request. */
+/** #6007: what an agent does after a 413: nothing was processed; a batch goes smaller, a big page goes by file. */
 function oversizeSuggestion(bodyCap: number): string {
-  return `Nothing was processed. Send smaller requests: split put_pages into calls under ${bodyCap} bytes each (a new request_id per call). The host operator sets this limit with GBRAIN_HTTP_MAX_BODY_BYTES.`;
+  return `Nothing was processed: this transport reads at most ${bodyCap} bytes per request (GBRAIN_HTTP_MAX_BODY_BYTES on the brain host). Send put_pages as smaller batches, a new request_id per call. Do not split a page: one page over this limit goes by file instead, so ask the user to write it into the brain repository and run gbrain sync, or to run gbrain import <file> or gbrain put <slug> < file on the brain host.`;
 }
 
 function hashToken(token: string): string {
@@ -535,6 +535,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
         }
         const result = await dispatchToolCall(engine, toolName, args, {
           remote: true,
+          admissionOrigin: 'interactive',
           // WP1/D7: network transport — the dispatch-layer localOnly
           // backstop keys off this marker.
           transport: 'http',
@@ -551,6 +552,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
           // IS the ceiling request_tools bounds catalog + persist by.
           surfaceCeiling: surface,
           resultRows: resultRowsForRequest(req.headers.get(GBRAIN_CLIENT_HEADER), await resolveResultRowsMode(engine, fileConfig)), // C1; row shape only, never authority
+          ...(isGbrainThinClient(req.headers.get(GBRAIN_CLIENT_HEADER)) ? { thinClient: true } : {}), // large pages: default body mode only, never authority
         });
         // Same status taxonomy as the OAuth transport (denied_after_list /
         // success_with_warnings feed the amendment-33 metric + E4 usage).

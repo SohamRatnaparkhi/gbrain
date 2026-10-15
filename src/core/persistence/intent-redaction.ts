@@ -31,7 +31,7 @@
 import { opError } from '../ops/contract.ts';
 import type { BrainEngine } from '../engine.ts';
 import { enterClaimStep, type ClaimPhaseClock } from './claim-phase.ts';
-import { jsonBytes } from './digest.ts';
+import { EFFECT_BYTES_SQL, retainedReceiptBytes } from './receipt-bytes.ts';
 import { lockCounters } from './journal.ts';
 import { isTerminal, principalKey, requestPrincipal, type WriteRequest } from './model.ts';
 
@@ -207,15 +207,15 @@ export async function redactRequestIntents(tx: BrainEngine, targets: readonly In
     const detail = redactJson(current.error_detail, opts.needles ?? []);
     if (current.compacted && JSON.stringify(outcome) === JSON.stringify(current.outcome) && JSON.stringify(detail) === JSON.stringify(current.error_detail)
       && current.error_message === null) continue;
-    const [effects] = await tx.executeRaw<{ bytes: string }>(`SELECT COALESCE(SUM(octet_length(data::text)+octet_length(kind)+1024),0)::text AS bytes
+    const [effects] = await tx.executeRaw<{ bytes: string }>(`SELECT COALESCE(SUM(${EFFECT_BYTES_SQL}),0)::text AS bytes
       FROM persistence_effects WHERE request_id=$1::uuid`, [current.id]);
-    const retained = Math.min(Number(current.terminal_reservation), jsonBytes(current.authority) + jsonBytes(outcome ?? {})
-      + (detail ? jsonBytes(detail) : 0) + Number(effects.bytes) + 1024);
+    const retained = Math.min(Number(current.terminal_reservation), retainedReceiptBytes({ authority: current.authority, outcome, error_detail: detail,
+      client_request_id: current.client_request_id }, { stage: 'compacted', effects: Number(effects.bytes) }));
     await tx.executeRaw(`UPDATE persistence_requests SET intent=NULL,compacted=true,error_message=NULL,terminal_reservation=$2,
       outcome=$3::text::jsonb,error_detail=$4::text::jsonb WHERE id=$1::uuid`,
     [current.id, retained, outcome == null ? null : JSON.stringify(outcome), detail == null ? null : JSON.stringify(detail)]);
     for (const key of ['brain', principalKey(requestPrincipal(current))]) {
-      await tx.executeRaw('UPDATE persistence_counters SET terminal_bytes=terminal_bytes-$2 WHERE key=$1', [key, Number(current.terminal_reservation) - retained]);
+      await tx.executeRaw('UPDATE persistence_counters SET terminal_bytes=terminal_bytes-LEAST($2::bigint,terminal_bytes) WHERE key=$1', [key, Number(current.terminal_reservation) - retained]);
     }
     redacted++;
   }

@@ -103,6 +103,8 @@ export const GRADUATION_INVENTORY: Inventory = {
     carry('op_checkpoints', 'operational', 'Resumable operation checkpoints.'),
     carry('open_loops', 'user_data', 'Open loops and their status.'),
     carry('page_aliases', 'user_data', 'Page aliases.'),
+    carry('page_embedding_budget', 'operational', 'Large-page embedding spend ledger: per-page spend, holds awaiting approval and caps; without it held pages would embed without consent.'),
+    carry('page_extraction_state', 'operational', 'Extraction watermarks and partial-input receipts per page and pipeline; without them the next extraction of a large page reads its head again and records the receipt anew.'),
     carry('page_facts_reconcile', 'operational', 'Facts reconcile watermark: per-page revision extract_facts last reconciled; without it every page is due again.'),
     carry('page_generation_clock', 'operational', 'Page generation clock (derived side table, verified equal).'),
     carry('page_mention_state', 'operational', 'Entity mention index: per-page mention watermark; without it every page is due for a rescan.'),

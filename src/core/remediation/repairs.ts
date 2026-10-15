@@ -26,6 +26,7 @@ import { cliRenderContext, renderAction, type RenderedAction } from '../agent-ou
 import { readFix } from '../ops/op-fix.ts';
 import { isStatementTimeoutError } from '../retry-matcher.ts';
 import { redactConnectionInfo } from '../audit/redact-connection-info.ts';
+import { withAdmissionOrigin } from '../persistence/admission-origin.ts';
 
 export interface RepairPlanStep {
   step: number;
@@ -184,8 +185,9 @@ export async function runRepairSteps(engine: BrainEngine, steps: RepairPlanStep[
       if (step.paid && step.embeds === 'effect' && step.est_usd_cost) opts.charge?.(step.est_usd_cost - (step.llm_usd ?? 0));
       const spentBefore = opts.spentUsd?.() ?? 0;
       try {
-        const applied = llm ? await runner.run(step.kind, scope, { maxLlmUsd: opts.remainingUsd() })
-          : step.paid && step.embeds === 'inline' && opts.stepBudget ? await opts.stepBudget(() => runner.run(step.kind, scope)) : await runner.run(step.kind, scope);
+        // #6696 (A5): an approved repair step is the operator's own write, like gbrain repair; an enclosing background scope still wins.
+        const applied = await withAdmissionOrigin('interactive', () => llm ? runner.run(step.kind, scope, { maxLlmUsd: opts.remainingUsd() })
+          : step.paid && step.embeds === 'inline' && opts.stepBudget ? opts.stepBudget(() => runner.run(step.kind, scope)) : runner.run(step.kind, scope));
         if (llm) opts.charge?.(Math.max(0, (applied.cost.llm_usd ?? 0) - ((opts.spentUsd?.() ?? 0) - spentBefore)));
         const failed = applied.failed.length;
         const failedMessage = failed ? `${failed} item(s) refused and left unchanged (first: ${applied.failed[0]!.item}, ${applied.failed[0]!.reason}); `

@@ -88,7 +88,7 @@ async function rpc(base: string, token: string, method: string, params?: unknown
   return JSON.parse(dataLine ? dataLine.slice('data:'.length) : text).result;
 }
 
-const FULL_SURFACE_KEYS = ['auth', 'isListed', 'logger', 'metaHook', 'noticeLedger', 'remote', 'resultRows', 'sourceId', 'surface', 'surfaceCeiling', 'takesHoldersAllowList', 'transport'];
+const FULL_SURFACE_KEYS = ['admissionOrigin', 'auth', 'isListed', 'logger', 'metaHook', 'noticeLedger', 'remote', 'resultRows', 'sourceId', 'surface', 'surfaceCeiling', 'takesHoldersAllowList', 'transport'];
 
 describe('POST /mcp dispatch context', () => {
   test('full surface: remote http dispatch with the verified auth and token source scope', async () => {
@@ -99,6 +99,8 @@ describe('POST /mcp dispatch context', () => {
     const { opts } = calls[0];
     expect(Object.keys(opts).sort()).toEqual(FULL_SURFACE_KEYS);
     expect(opts.remote).toBe(true);
+    // #6696 (A5): a remote MCP write is interactive, so the background pause line never refuses it.
+    expect(opts.admissionOrigin).toBe('interactive');
     // C1: a client without the thin-client header gets the host default, lean rows.
     expect(opts.resultRows).toBe('lean');
     expect(opts.transport).toBe('http');

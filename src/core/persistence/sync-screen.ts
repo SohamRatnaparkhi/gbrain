@@ -15,7 +15,7 @@ import { realpathSync } from 'node:fs';
 import { relative, resolve, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import { OperationError, opError } from '../ops/contract.ts';
-import { loadImportSanityConfig, screenNormalized, type ImportSanityConfig } from '../import-screen.ts';
+import { loadImportSanityConfig, screenNormalized, type ImportSanityConfig, type ImportScreenResult } from '../import-screen.ts';
 import { fencesNormalizeEnabled } from '../fence-repair/config.ts';
 import type { FenceFix } from '../fence-repair/types.ts';
 import { parseMarkdown, RECOVERY_VERSION } from '../markdown.ts';
@@ -177,7 +177,7 @@ export function managedImageHold(entry: Pick<SyncEntry, 'path' | 'sourcePath' | 
 /** #5988: the hold of a file over the sync read bound, whose content is never read (#6529: shared with the image freeze). */
 export function oversizeHold(entry: Pick<SyncEntry, 'path' | 'sourcePath' | 'working' | 'renameFrom' | 'renameHeld'>, slug: string, pageId: number | null, size: number | null, blob: TreeBlob | null | undefined): HeldEntry {
   return heldEntry(entry, slug, pageId, { code: 'file_too_large',
-    message: `File too large (${size ?? 'over 10485760'} bytes; the sync read bound is ${SYNC_READ_BOUND} bytes). Split the content into smaller files or leave it out of the source.` }, null, blob);
+    message: `File too large (${size ?? `over ${SYNC_READ_BOUND}`} bytes; the sync read bound is the ${SYNC_READ_BOUND}-byte (24 MiB) page ceiling). Pages up to the ceiling are chunked and searchable; leave this file out of the source (sync.exclude) or keep it outside the brain repo. See docs/guides/memory-boundaries.md#large-pages.` }, null, blob);
 }
 
 const purgeTombstonesByRun = new WeakMap<SyncScreenRun, Promise<Map<string, string>>>();
@@ -201,6 +201,27 @@ export interface FrozenImportScreen {
 }
 
 /**
+ * #6696 C8: the `SyncImportScreenInput` a frozen import is screened with (the rename source as its base, the run's
+ * schema pack, sanity settings and purge tombstones). Shared with the slug-conflict repair, which screens a held
+ * file exactly as the next sync would.
+ */
+export async function frozenImportScreenInput(engine: BrainEngine,
+  input: Pick<FrozenImportScreen, 'cursor' | 'entry' | 'slug' | 'snapshot' | 'rawHash' | 'lineEndingOnly'> & { content: string }, run: SyncScreenRun): Promise<SyncImportScreenInput> {
+  const { entry, slug, snapshot } = input;
+  const moved = entry.renameFrom && entry.renameFrom.slug !== slug ? entry.renameFrom : undefined;
+  const base = moved ? await engine.readPageSnapshot(moved.slug, { sourceId: input.cursor.sourceId, includeDeleted: true }) : snapshot;
+  return { content: input.content, rawHash: input.rawHash, lineEndingOnly: input.lineEndingOnly, slug, sourcePath: entry.sourcePath, path: entry.path,
+    root: input.cursor.root, snapshot, base, renamed: !!moved, activePack: run.activePack, sanity: run.sanity,
+    purgedPages: await runPurgeTombstones(engine, run, input.cursor.sourceId) };
+}
+
+/** The sync screen of one frozen import with the run's `fences.normalize` settled (#6188: with it false, a fence Tier 1 would rewrite is held). */
+export async function screenFrozenContent(screenInput: SyncImportScreenInput, run: SyncScreenRun): Promise<ImportScreenResult> {
+  const { screen } = screenSyncImport(screenInput);
+  return screenNormalized(screen) && !await run.normalize() ? screenSyncImport({ ...screenInput, normalize: false }).screen : screen;
+}
+
+/**
  * The hold a frozen import earns, or null to admit it. Throws
  * `sync_parser_regression` (policy `stop`) when gbrain would hold bytes the
  * page's provenance says a validating gbrain imported.
@@ -211,14 +232,8 @@ export async function screenFrozenImport(engine: BrainEngine, input: FrozenImpor
   if (entry.renameHeld) {
     return heldEntry(entry, slug, pageId, { code: 'rename_held', reason: 'rename_source_changed', message: `${entry.path} is a rename of page ${entry.renameHeld.slug}, which changed after the rename was recorded, so the page was not moved.` }, content, blob);
   }
-  const moved = entry.renameFrom && entry.renameFrom.slug !== slug ? entry.renameFrom : undefined;
-  const base = moved ? await engine.readPageSnapshot(moved.slug, { sourceId: input.cursor.sourceId, includeDeleted: true }) : snapshot;
-  const screenInput: SyncImportScreenInput = { content, rawHash: input.rawHash, lineEndingOnly: input.lineEndingOnly, slug, sourcePath: entry.sourcePath, path: entry.path,
-    root: input.cursor.root, snapshot, base, renamed: !!moved, activePack: run.activePack, sanity: run.sanity,
-    purgedPages: await runPurgeTombstones(engine, run, input.cursor.sourceId) };
-  let { screen } = screenSyncImport(screenInput);
   // #6188: a fence Tier 1 rewrites is admitted (publication writes the normalized file back); with fences.normalize=false it is held.
-  if (screenNormalized(screen) && !await run.normalize()) ({ screen } = screenSyncImport({ ...screenInput, normalize: false }));
+  const screen = await screenFrozenContent(await frozenImportScreenInput(engine, { ...input, content }, run), run);
   if (screen.status === 'importable' && screen.fences?.fixes.length) input.onNormalized?.(screen.fences.fixes);
   if (screen.status !== 'refused') return null;
   const refusal = screen.refusal;

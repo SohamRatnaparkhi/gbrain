@@ -85,17 +85,20 @@ describe('write gate work counters (#6490)', () => {
     expect(work.scannedChars).toBeLessThanOrEqual(130_000);
   });
 
-  test('5 MB adversarial text (every anchor in every window): the prefilter cannot help, the ranged search still bounds the scan', () => {
+  test('adversarial text at the import cap (every anchor in every window): the prefilter cannot help, the ranged search still bounds the scan', () => {
     const { work, hits, plainHits, fieldChars } = assess(adversarial(MAX_IMPORT_BYTES));
-    console.log(`[write-gate work] 5 MB adversarial: ${JSON.stringify(work)}`);
+    console.log(`[write-gate work] ${MAX_IMPORT_BYTES}-byte adversarial: ${JSON.stringify(work)}`);
     expect(hits).toEqual(plainHits);
-    // Measured: windows 1491, patternChecks 29802, regexCalls 219480, scannedChars 116975221.
+    // Measured at 5 MB: windows 1491, patternChecks 29802, regexCalls 219480, scannedChars 116975221; at the
+    // 24 MiB page ceiling: windows 7500, patternChecks 149982, regexCalls 1104728, scannedChars 588776939.
+    // The bounds are the 5 MB bounds per byte, so the work stays linear in the page size.
+    const perFiveMb = MAX_IMPORT_BYTES / 5_000_000;
     expect(work.normalizedChars).toBe(0);
     expect(work.anchorScanChars).toBe(fieldChars);
     expect(work.windows).toBeLessThanOrEqual(Math.ceil(fieldChars / STEP) + 1);
-    expect(work.patternChecks).toBeLessThanOrEqual(45_000);
-    expect(work.regexCalls).toBeLessThanOrEqual(330_000);
-    expect(work.scannedChars).toBeLessThanOrEqual(175_000_000);
+    expect(work.patternChecks).toBeLessThanOrEqual(45_000 * perFiveMb);
+    expect(work.regexCalls).toBeLessThanOrEqual(330_000 * perFiveMb);
+    expect(work.scannedChars).toBeLessThanOrEqual(175_000_000 * perFiveMb);
   });
 
   test('the accumulator is per assessment: a second call starts from zero and a reused one adds up', () => {

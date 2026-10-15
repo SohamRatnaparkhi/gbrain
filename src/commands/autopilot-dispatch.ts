@@ -299,6 +299,8 @@ export async function dispatchFreshnessSyncs(
         const lastSyncMs = src.last_sync_at ? new Date(src.last_sync_at).getTime() : 0;
         const ageMs = now - lastSyncMs;
         if (ageMs < intervalMs) continue; // fresh enough
+        // #6706: a live sync job (any submitter) is already draining this source; coalescing into another submitter's row is refused.
+        if (await (await import('../core/persistence/sync-movement.ts')).liveSyncJob(engine, src.id) !== null) continue;
         try {
           const job = await queue.add(
             'sync',
@@ -314,7 +316,9 @@ export async function dispatchFreshnessSyncs(
               idempotency_key: `autopilot-sync:${src.id}:${slot}`,
               max_attempts: 2,
               timeout_ms: timeoutMs,
-              maxWaiting: 1,
+              // #6706: single-flight per source. A sync job drains until synced or its deadline, so a tick while one runs
+              // coalesces into it (waiting or live-lock active) instead of starting a second drainer on the same cursor.
+              maxPending: 1,
             },
           );
           if (jsonMode) {

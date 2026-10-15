@@ -13,6 +13,7 @@ import { compileCanonicalProjections } from '../src/core/persistence/canonical-p
 import { withdrawalFenceBlocks } from '../src/core/facts/withdrawal-overlay.ts';
 import { splitBody } from '../src/core/markdown.ts';
 import type { ParsedPage } from '../src/core/import-file.ts';
+import { cpuMs } from './helpers/cpu-time.ts';
 
 const take = (claim: string) => ({ claim, kind: 'take' as const, holder: 'alice-example', weight: 0.5, active: true });
 const realTakes = (claim: string) => upsertTakeRow('', take(claim)).body;
@@ -83,38 +84,36 @@ describe('markdown code map', () => {
     // A per-line search that runs to EOF on every line lacking a backtick is
     // quadratic: ~200 ms per MB of plain prose. Linear is ~1 ms.
     const prose = 'Plain prose with no code at all, just words.\n'.repeat(45_000);
-    const start = performance.now();
-    expect(scanMarkdownCode(prose).fenced).toEqual([]);
-    expect(performance.now() - start).toBeLessThan(150);
+    const ms = cpuMs(() => expect(scanMarkdownCode(prose).fenced).toEqual([]));
+    expect(ms).toBeLessThan(150);
   });
 
   test('stays linear with thousands of quoted markers on one long line', () => {
     // Inline spans are computed per marker line on demand; a line's spans must
     // be computed once, not once per marker on it.
     const line = `\`${TAKES_FENCE_BEGIN}\` `.repeat(20_000);
-    const start = performance.now();
-    expect(indexOfOutsideCode(line, TAKES_FENCE_BEGIN)).toBe(-1);
-    expect(performance.now() - start).toBeLessThan(150);
+    const ms = cpuMs(() => expect(indexOfOutsideCode(line, TAKES_FENCE_BEGIN)).toBe(-1));
+    expect(ms).toBeLessThan(150);
   });
 
   test('stays linear across many marker lines on a page with no backticks', () => {
     // A facts/takes-heavy page without inline code: judging each marker line
     // must not search the rest of the body for a backtick.
     const body = `${FACTS_FENCE_BEGIN}\n${'x'.repeat(80)}\n`.repeat(20_000);
-    const start = performance.now();
-    const code = scanMarkdownCode(body);
-    let n = 0;
-    for (let at = indexOfOutsideCode(body, FACTS_FENCE_BEGIN); at !== -1; at = indexOfOutsideCode(body, FACTS_FENCE_BEGIN, at + 1, code)) n++;
-    expect(n).toBe(20_000);
-    expect(performance.now() - start).toBeLessThan(150);
+    const ms = cpuMs(() => {
+      const code = scanMarkdownCode(body);
+      let n = 0;
+      for (let at = indexOfOutsideCode(body, FACTS_FENCE_BEGIN); at !== -1; at = indexOfOutsideCode(body, FACTS_FENCE_BEGIN, at + 1, code)) n++;
+      expect(n).toBe(20_000);
+    });
+    expect(ms).toBeLessThan(150);
   });
 
   test('stays linear when a lone CR sits far before many marker lines', () => {
     // Finding a marker's line must never search toward the start of the body.
     const body = 'head\r' + `plain line of prose here\n\`${TAKES_FENCE_BEGIN}\`\n`.repeat(20_000);
-    const start = performance.now();
-    expect(indexOfOutsideCode(body, TAKES_FENCE_BEGIN)).toBe(-1);
-    expect(performance.now() - start).toBeLessThan(150);
+    const ms = cpuMs(() => expect(indexOfOutsideCode(body, TAKES_FENCE_BEGIN)).toBe(-1));
+    expect(ms).toBeLessThan(150);
   });
 
   test('indexOfOutsideCode skips quoted occurrences and finds the live one', () => {

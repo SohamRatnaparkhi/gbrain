@@ -30,7 +30,10 @@
  * `ContentRepairReceipt` (`contentRepair`), outcome field `content_repair`,
  * subject `gbrain: repair frontmatter slug in <path>` and trailer
  * `gbrain-repair: frontmatter_slug_conflict <tier> <confidence>`; its
- * refusals route to `gbrain repair content`.
+ * refusals route to `gbrain repair content`. #6696 C8: an intent carrying
+ * `holdObservedAt` (the slug-conflict `import` of unchanged held bytes)
+ * clears the hold only while it is that observation, so a hold a sync wrote
+ * after the repair read it stays.
  *
  * Trusted local CLI only: admission refuses remote and delegated callers, the
  * `put_page` reserved-field gate refuses the kind from MCP, and the preparer
@@ -96,6 +99,8 @@ export interface ManagedFileRepairIntent extends Record<string, unknown> {
   fenceRepair?: FenceRepairReceipt;
   /** #6377 a slug-conflict repair's receipt (codes and hashes only). */
   contentRepair?: ContentRepairReceipt;
+  /** #6696 C8: the hold observation the repair read; the publication clears the path's hold only while it is that observation (a newer hold stays). */
+  holdObservedAt?: string;
 }
 
 /** The repair command a refusal names (D6 router): a fence repair's, the content repair's, or the frontmatter repair's. */
@@ -272,6 +277,8 @@ export interface ManagedFileRepairInput {
   fenceRepair?: FenceRepairReceipt;
   /** #6377 set by the `slug-conflicts` kind: the write's receipt, and its refusals route to `gbrain repair content`. */
   contentRepair?: ContentRepairReceipt;
+  /** #6696 C8: clear the hold only while it is this observation. */
+  holdObservedAt?: string;
 }
 
 export async function submitManagedFileRepair(ctx: OperationContext, input: ManagedFileRepairInput): Promise<Record<string, unknown>> {
@@ -297,7 +304,7 @@ export async function prepareManagedFileRepairMutation(engine: BrainEngine, row:
   const kind = repairKindOf(p ?? {});
   if (row.authority.remote || row.principal_kind !== 'local_cli') throw trustedCliRequired('A managed file repair requires a trusted local CLI writer.');
   if (!p || p.kind !== 'managed_file_repair' || typeof p.content !== 'string' || typeof p.path !== 'string' || typeof p.sourcePath !== 'string'
-    || typeof p.beforeHash !== 'string' || typeof p.resultDigest !== 'string') {
+    || typeof p.beforeHash !== 'string' || typeof p.resultDigest !== 'string' || (p.holdObservedAt !== undefined && typeof p.holdObservedAt !== 'string')) {
     throw opError('invalid_params', 'The durable file repair intent is incomplete.',
       `Repair request ${row.request_id} in source ${row.source_id} has no complete intent, so it published nothing. Preview the repair again: gbrain repair ${kind} --source ${row.source_id}.`,
       { fix: previewFix(row.source_id, kind) });
@@ -373,7 +380,7 @@ export async function prepareManagedFileRepairMutation(engine: BrainEngine, row:
       await applied.apply(tx);
       await tx.executeRaw('UPDATE pages SET source_path=$3 WHERE source_id=$1 AND slug=$2 AND source_path IS DISTINCT FROM $3', [row.source_id, row.slug, p.sourcePath]);
       if (!applied.noop) { await project(tx); await sealPageTextProjection(tx, row.slug, row.source_id); }
-      const holdCleared = await clearGitHold(tx, { sourceId: row.source_id, incarnation: row.source_incarnation, path: p.path, observedAt: new Date().toISOString() });
+      const holdCleared = await clearGitHold(tx, { sourceId: row.source_id, incarnation: row.source_incarnation, path: p.path, observedAt: p.holdObservedAt ?? new Date().toISOString() });
       const [page] = await tx.executeRaw<{ id: number }>('SELECT id FROM pages WHERE source_id=$1 AND slug=$2', [row.source_id, row.slug]);
       if (page) await recordSyncImportProvenance(tx, { source_id: row.source_id, incarnation: row.source_incarnation, page_id: Number(page.id), origin: p.sourcePath,
         raw_sha256: sha256(importContent), gbrain_version: VERSION });

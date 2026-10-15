@@ -52,6 +52,16 @@ verbs and the eval harnesses pin expansion per call, so `search` never
 expands, even with `search.expansion=true`. `gbrain search modes` reports the
 resolved row.
 
+To turn expansion off for one brain without changing its mode, run
+`gbrain config set search.expansion false` on the brain host. Every `query`
+call that leaves `expand` unset then skips it: the CLI, MCP over stdio and
+`gbrain serve --http` all resolve the same row. A call that passes
+`--expand` / `expand: true` still expands. `gbrain config unset search.expansion`
+returns to the mode default. The key is per brain and lives in its database,
+so a thin client (`gbrain init --mcp-only`) can't set it; whoever runs the
+brain host sets it, and the host needs gbrain v0.60.188.0 or later, because
+`query` ignored `search.expansion` before that release.
+
 Keyless retrieval takes the keyword-only path before expansion; configured
 embedding and expansion providers are prerequisites. Image-only retrieval also
 skips expansion. Check response metadata `expansion_applied` for actual

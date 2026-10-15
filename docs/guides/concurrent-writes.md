@@ -839,8 +839,8 @@ Default admission limits are enforced atomically:
 | --- | ---: | ---: |
 | Outstanding requests | 100 | 1,000 |
 | Queued intent bytes | 32 MiB | 256 MiB |
-| Lifetime request IDs | 250,000 | 1,000,000 |
-| Terminal receipt reservation | 1.5 GiB | 8 GiB |
+| Lifetime request IDs | 2,000,000 | 8,000,000 |
+| Terminal receipt reservation | 16 GiB | 64 GiB |
 | Recovery bytes | — | 1 GiB, also 256 MiB per worktree |
 
 Completion space is reserved at admission. Beforeimage/recovery bytes are
@@ -852,10 +852,15 @@ not evicted, and receipts with unfinished effects stay retained without
 blocking compaction of later receipts. Lifetime IDs and replay protection are
 not silently reset.
 
-Each admission reserves at least 16 KiB of receipt bytes until compaction; a
-compacted receipt keeps about 4 KiB. The cumulative defaults cover one
-principal admitting about 600 writes a day for at least a year. Every limit and
-the retention window are brain-wide database settings:
+Each admission reserves at least 16 KiB of receipt bytes. When the request
+finishes and none of its effects is still pending, the reservation shrinks in
+the same statement to what the receipt keeps (its intent, authority, outcome,
+error, effects and 4 KiB of slack), so a `remember`, a maintenance write or a
+conflict gives most of its 16 KiB back at once; a page write whose embedding or
+Git effect is still queued keeps its reservation until compaction. A compacted
+receipt keeps about 4 KiB. The cumulative defaults cover one principal
+admitting 5,000 writes a day for at least a year ([growth model](#growth-model)).
+Every limit and the retention window are brain-wide database settings:
 
 ```bash
 gbrain config set persistence.limits.principal_lifetime_ids 500000
@@ -869,9 +874,127 @@ Keys are `persistence.limits.<limit>` for `principal_outstanding`,
 `brain_outstanding`, `principal_intent_bytes`, `brain_intent_bytes`,
 `principal_lifetime_ids`, `brain_lifetime_ids`, `principal_terminal_bytes`,
 `brain_terminal_bytes`, `brain_recovery_bytes` and `worktree_recovery_bytes`,
-each a nonnegative integer. `gbrain doctor` warns (`persistence_capacity`) once
-a principal or the brain uses 80% of its lifetime IDs or receipt bytes and
-prints the `gbrain config set` command with a value that covers about one more
-year at the current admission rate; a `queue_capacity` refusal carries the same
-command. Raising a cap is a mitigation: lifetime IDs remain permanent replay
-protection.
+each a nonnegative integer. `gbrain doctor` (`persistence_capacity`) forecasts
+each cumulative cap from the full last-7-day admission aggregate: it warns when
+a principal or the brain uses 80% of its lifetime IDs or receipt bytes or would
+run out within `persistence.capacity.warn_days` (30) days, and fails at 95% or
+within `persistence.capacity.fail_days` (7) days. Receipt bytes are forecast at
+their compacted (net) size once compaction can start; the finding's `basis`
+says which rate it used. It prints the `gbrain config set` command with a value
+that covers about one more year at that rate; `persistence_request_growth`
+uses the same threshold and value, and a `write_quota_exhausted` refusal
+carries the same command. Raising a cap is a mitigation: lifetime IDs remain
+permanent replay protection.
+
+<a id="growth-model"></a>
+### Growth model
+
+The defaults come from this model, sized for an autopilot brain that admits
+5,000 requests a day for 365 days. Configured values are never changed.
+
+- **Request IDs** are permanent, so they grow by the admission rate:
+  5,000 × 365 = 1,825,000. The principal default is 2,000,000; the brain
+  default, 8,000,000, keeps the brain at four principals' worth.
+- **Receipt bytes** grow by two parts. Through the 30-day retention window a
+  receipt holds its reservation (up to 16,384 bytes; true-up returns most of
+  it when no effect is pending), and after compaction it keeps about 4,096
+  bytes (a compacted `put_page` measures about 3.9 KB). After a year at
+  5,000 a day: 5,000 × 4,096 × 335 + 5,000 × 16,384 × 30 = 6,860,800,000 +
+  2,457,600,000 = 9,318,400,000 bytes (8.7 GiB).
+- **Bulk days** (a reclone or a full sync) hold their reservations for the
+  window too. A 22,074-admission day reserves 22,074 × 16,384 =
+  361,660,416 bytes; three in one window is about 1.0 GiB.
+- **Carried-in use**: a brain that already holds 74,982 receipts at
+  1,228,424,148 bytes (16,383 bytes each, nothing compacted yet) adds 1.1 GiB.
+
+8.7 + 1.0 + 1.1 = 10.8 GiB, so the principal default is 16 GiB, which still
+covers the year if compacted receipts average 7 KB instead of 4 KB
+(5,000 × 7,168 × 335 + 2,457,600,000 = 14.5 GB, plus the same 2.1 GiB). The
+brain default is 64 GiB.
+
+For scale: the previous principal default of 1.5 GiB (1,610,612,736 bytes)
+left that brain 382,188,588 bytes, or 23,327 more admissions at 16,384 bytes:
+about 7 days at 3,308 a day and one day at 22,074. On the new defaults the
+same brain has (2,000,000 − 74,982) / 3,308 = 581 days of request IDs at its
+current rate, 385 at 5,000 a day.
+
+**Autopilot brains: check capacity on day one.** An autopilot brain admits
+far more requests than an interactive one. After its first day of runs:
+
+```bash
+gbrain doctor --only persistence_capacity,persistence_request_growth --json
+```
+
+**Say to your agent:** *"How many days of write capacity does my brain have left?"*
+
+<a id="counter-drift"></a>
+### Counter drift and compaction health
+
+Two read-only doctor checks watch the receipt-bytes accounting:
+
+- `persistence_counter_drift` compares each `persistence_counters` row
+  (brain and every principal) with what the receipts hold
+  (`terminal_reservation` per request plus lifecycle receipts) in one
+  statement, and reports `persistence.true_up.clamped`, the number of
+  settle-time decrements that were clamped at zero. A positive delta charges
+  capacity no receipt holds; a negative one under-counts. It changes nothing.
+- `persistence_compaction` reads `persistence.maintenance.last_compaction`,
+  the record each resident consumer's compaction pass writes (`at`,
+  `host_id`, `compacted`, `freed_bytes`, `skipped_by_reason`), and warns when
+  a full consumer has run longer than
+  `persistence.maintenance.compaction_stale_hours` (default 24) without a
+  pass. Its fix previews `gbrain repair receipt-compaction --json`.
+
+<a id="quota-near-exhaustion"></a>
+### Quota near exhaustion
+
+When `persistence_capacity` warns or fails, or a write is refused with
+`write_quota_exhausted`:
+
+1. Read the finding: `gbrain doctor --only persistence_capacity --json`.
+   `details.resources[]` names the scope, resource, days left and `basis`;
+   `fix` is the reversible unblock.
+2. Run the `gbrain config set <key> <value>` it prints on the brain host
+   (undo with `gbrain config unset <key>`). Writes resume at once; retry the
+   refused write with the same `request_id`.
+3. Verify: `gbrain doctor --only persistence_capacity --json` reads `ok`.
+
+Raising a receipt-bytes cap is safe: the counter tracks bytes that are really
+stored, and compaction frees the window's reservations as receipts age out.
+
+**Warnings before the wall.** A cap at or past 80%, or one that runs out
+within `persistence.capacity.warn_days` (default 30), adds the
+`[gbrain notice write_capacity_low]` notice (kind `info`) with the same
+`gbrain config set` command. Write and sync receipts carry it at most once an
+hour per process per scope (a remote client sees only the brain and its own
+principal); `gbrain sync status`, doctor and autopilot cycle output carry it
+every time. `gbrain notices mute write_capacity_low` mutes it on receipts;
+doctor still reports it. When a cap passes
+`persistence.capacity.background_pause_pct` (default 80) background
+producers pause and `[gbrain notice write_capacity_backpressure]` (kind
+`degraded`) fires once when the pause starts. Every notice reads a capacity
+snapshot that refreshes at most once a minute; no write computes a forecast.
+
+**Alerting (hosted operators).** The admin `/metrics` endpoint exports
+`gbrain_write_capacity_used`, `gbrain_write_capacity_limit` and
+`gbrain_write_capacity_days_to_exhaustion`, labelled `scope` and `resource`
+(`lifetime_ids` or `terminal_bytes`), from the same snapshot. The public
+`/health` probe is unchanged. A Prometheus rule that pages before the
+background pause and before the wall:
+
+```yaml
+groups:
+  - name: gbrain-write-capacity
+    rules:
+      - alert: GbrainWriteCapacityLow
+        expr: gbrain_write_capacity_used / gbrain_write_capacity_limit >= 0.8 or gbrain_write_capacity_days_to_exhaustion < 30
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.scope }} {{ $labels.resource }} write cap near exhaustion"
+          runbook: docs/guides/concurrent-writes.md#quota-near-exhaustion
+      - alert: GbrainWriteCapacityCritical
+        expr: gbrain_write_capacity_used / gbrain_write_capacity_limit >= 0.95 or gbrain_write_capacity_days_to_exhaustion < 7
+        for: 5m
+        labels: { severity: critical }
+```

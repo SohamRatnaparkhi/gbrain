@@ -44,4 +44,5 @@ async function runManagedSyncMovementCheck(ctx: DoctorContext): Promise<Check[]>
   return checks;
 }
 
-export const managedSyncMovementEntry: DoctorEntry = { name: 'managed_sync_not_moving', emits: ['managed_sync_not_moving'], run: runManagedSyncMovementCheck };
+/** #6696 B1: an ops section (sync cursor movement and age); it reads request and checkpoint tables, so on PGLite the ops tier skips it. */
+export const managedSyncMovementEntry: DoctorEntry = { name: 'managed_sync_not_moving', emits: ['managed_sync_not_moving'], tier: 'ops', opsPglite: 'not_applicable', run: runManagedSyncMovementCheck };

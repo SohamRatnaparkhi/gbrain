@@ -54,7 +54,7 @@ import { trustedCliRequired } from '../ops/op-fix.ts';
 import { shellQuote, type Action } from '../agent-output.ts';
 import { autoFixFrontmatter, createFrontmatterBackup, makeFrontmatterBackupRunId } from '../brain-writer.ts';
 import { classifyImportHold, parseMarkdown, serializePageToMarkdown } from '../markdown.ts';
-import { MAX_FILE_SIZE } from '../import-screen.ts';
+import { MAX_FILE_SIZE, type ImportScreenResult } from '../import-screen.ts';
 import { importFromFile } from '../import-file.ts';
 import { resolveSlugForPath, slugifyPath } from '../sync.ts';
 import { isReservedSkillBundlePath } from '../skill-reserved-paths.ts';
@@ -68,6 +68,7 @@ import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, sa
 import { clearGitHold, readGitHold, readGitSourceHolds, recordContentHoldRepair, type ContentHoldRepairState, type GitHoldRecord } from '../persistence/sync-holds.ts';
 import { confinedRepairTarget, prepareRepairPublication, repairScreenConfig, submitManagedFileRepair } from '../persistence/file-repair.ts';
 import { repairBusy, repairBusyMessage } from '../persistence/repair-busy.ts';
+import { frozenImportScreenInput, loadSyncScreenRun, screenFrozenContent } from '../persistence/sync-screen.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
 import { attemptStore } from '../fence-repair/attempts.ts';
 import { fenceRepairLlmEnabled, readFenceRepairCaps } from '../fence-repair/config.ts';
@@ -83,17 +84,21 @@ import { gitChildEnv } from '../git-env.ts';
 
 type Tier = 'deterministic' | 'llm';
 type DeterministicRule = 'absent_page' | 'different_type';
+/** #6696 C8: a hold the sync screen now admits as the file is: the file is imported unchanged and the hold clears. */
+type ImportReason = 'already_clean' | 'already_exempt';
 interface Selection { source_ids: string[]; only: string[]; skip: string[]; no_llm: boolean }
 
 /** One previewed candidate: everything the hash binds (location, hashes, tier), never a frontmatter value. */
 interface ApprovedConflict {
   source_id: string; path: string; source_path: string; slug: string; mode: 'managed' | 'legacy';
   page_id: number | null; revision: string | null; before: string; upstream_version: string | null; held: boolean;
+  /** #6696 C8: the observation time of the hold the plan read; an import clears only that observation, never a newer one. */
+  observed_at: string | null;
   /** The slug the `slug:` line resolves to (alias followed), and that page's id and content hash; null when no page has it. */
   named: string | null; named_page_id: number | null; named_sha256: string | null;
   tier: Tier;
-  /** Deterministic: the rule and the sha256 of the edited bytes; null for the model tier (decided at apply time). */
-  rule: DeterministicRule | null; after: string | null;
+  /** Deterministic: the rule (or the import reason) and the sha256 of the bytes written; null for the model tier (decided at apply time). */
+  rule: DeterministicRule | ImportReason | null; after: string | null;
   estimate_usd: number;
   /** Model items from this one to the end of the plan (the pages a budget stop leaves waiting). */
   llm_waiting: number;
@@ -107,6 +112,8 @@ export interface SlugConflictsPreviewDetails {
   model: string | null;
   llm_enabled: boolean;
   diffs: Array<{ item: string; rule: DeterministicRule; diff: string }>;
+  /** #6696 C8: held files the sync screen now admits as they are (imported unchanged, the hold cleared). */
+  imports: Array<{ item: string; reason: ImportReason }>;
   llm_items: Array<{ item: string; named: string | null; estimate_usd: number }>;
   held: HeldEntry[];
   skipped: Array<{ item: string; reason: string }>;
@@ -131,6 +138,7 @@ const TRANSIENT: ReadonlySet<string> = new Set(['llm_unavailable', 'ledger_unava
 const STOPWORDS: ReadonlySet<string> = new Set(['a', 'an', 'the', 'of', 'and', 'or', 'for', 'to', 'in', 'on', 'at', 'by', 'with', 'from', 'inc', 'llc', 'ltd', 'co', 'corp', 'company', 'mr', 'ms', 'dr']);
 
 const itemName = (entry: Pick<ApprovedConflict, 'source_id' | 'path'>) => `${entry.source_id}:${entry.path}`;
+const isImport = (entry: Pick<ApprovedConflict, 'rule'>) => entry.rule === 'already_clean' || entry.rule === 'already_exempt';
 
 function previewArgv(scope: RepairScope, selection: Selection): string[] {
   return ['gbrain', 'repair', 'slug-conflicts', ...(scope.source_ids.length === 1 ? ['--source', scope.source_ids[0]!] : []),
@@ -175,7 +183,7 @@ function lookupSlugs(declared: string): string[] {
  * file path decides that this is the one fix the file needs, as `repair frontmatter` proposes it; null when the
  * file needs other frontmatter changes too, or the result still fails to strict-parse or earns a hold.
  */
-export function removeSlugLine(content: string, sourcePath: string, path: string, activePack?: FenceSource['activePack']): string | null {
+export function removeSlugLine(content: string, sourcePath: string, activePack?: FenceSource['activePack']): string | null {
   const fixed = autoFixFrontmatter(content, { filePath: sourcePath });
   if (fixed.fixes.length !== 1 || fixed.fixes[0]!.code !== 'SLUG_MISMATCH' || fixed.content === content) return null;
   const block = /^(\uFEFF?---[ \t]*(\r?\n))([\s\S]*?)(\r?\n---[ \t]*(?:\r?\n|$))/.exec(content);
@@ -185,7 +193,7 @@ export function removeSlugLine(content: string, sourcePath: string, path: string
   const at = lines.findIndex(line => /^slug:\s*\S/.test(line));
   if (at < 0) return null;
   const after = `${block[1]}${[...lines.slice(0, at), ...lines.slice(at + 1)].join(newline)}${block[4]}${content.slice(block[0].length)}`;
-  const parsed = parseMarkdown(after, path, { validate: true, ...(activePack ? { activePack } : {}) });
+  const parsed = parseMarkdown(after, sourcePath, { validate: true, ...(activePack ? { activePack } : {}) });
   if (parsed.errors?.some(error => error.code === 'YAML_PARSE')) return null;
   if (classifyImportHold(parsed, { expectedSlug: resolveSlugForPath(sourcePath), byteLength: Buffer.byteLength(after), maxBytes: MAX_FILE_SIZE })) return null;
   return after;
@@ -223,9 +231,30 @@ interface Candidate {
 
 type Analysis =
   | { status: 'skip'; reason: 'already_exempt' | 'already_clean' | 'gone' | 'unsafe_path' | 'not_utf8'; message: string }
+  | { status: 'import'; reason: ImportReason }
   | { status: 'deterministic'; rule: DeterministicRule; after: string }
   | { status: 'llm'; input: JudgmentInput }
-  | { status: 'held'; reason: string; message: string };
+  | { status: 'held'; reason: string; message: string; named?: string };
+
+/** #6696 C8: the managed sync screen of a candidate's bytes, exactly as the next sync freezes them; null when `sync.holds=fail` (sync screens nothing). */
+type SyncScreen = ((cand: Candidate, content: string) => Promise<ImportScreenResult>) | null;
+
+async function syncScreen(engine: BrainEngine, src: FenceSource): Promise<SyncScreen> {
+  const run = src.root ? await loadSyncScreenRun(engine, src.id, undefined, false) : null;
+  if (!run) return null;
+  return async (cand, content) => {
+    const snapshot = await engine.readPageSnapshot(cand.slug, { sourceId: src.id, includeDeleted: true });
+    const entry = { path: cand.path, sourcePath: cand.sourcePath, action: 'import' as const, working: cand.hold?.meta.working === true };
+    return screenFrozenContent(await frozenImportScreenInput(engine, { cursor: { sourceId: src.id, incarnation: src.incarnation, root: src.root! }, entry, slug: cand.slug, snapshot,
+      content, rawHash: sha256(content), lineEndingOnly: false }, run), run);
+  };
+}
+
+/** Sync files the candidate as page `cand.slug` but still holds it for its slug: both slugs, and the exact hand edit (`other` is recorded on the hold). */
+function slugPageMismatch(cand: Candidate, other: string, why: string): Analysis {
+  return { status: 'held', reason: 'slug_page_mismatch', named: other, message: `Sync files ${cand.path} as page ${cand.slug}, ${why}, so sync still holds it. `
+    + `By hand: make the slug: line name ${cand.slug} exactly or move the file to the path that derives ${cand.slug}, commit, and run gbrain sync --source ${cand.src.id} --no-pull.` };
+}
 
 async function readCandidate(engine: BrainEngine, src: FenceSource, path: string): Promise<{ ok: true; cand: Candidate } | { ok: false; reason: 'gone' | 'unsafe_path' | 'not_utf8' | 'no_checkout' }> {
   if (!src.root) return { ok: false, reason: 'no_checkout' };
@@ -253,33 +282,42 @@ async function readCandidate(engine: BrainEngine, src: FenceSource, path: string
     named, namedSlug: named?.page.slug ?? null } };
 }
 
-/** The free tier over a candidate: exempt, clean, a deterministic edit, or the model's question. */
-function analyze(cand: Candidate, slugsInCheckout: () => Set<string>): Analysis {
+/**
+ * The free tier over a candidate: exempt, clean, a deterministic edit, or the model's question. #6696 C8: with the
+ * sync screen, an exempt or clean file whose hold sync would now drop is imported as it is; one sync still holds is
+ * `slug_page_mismatch`; an edit is planned only when sync would import the edited bytes.
+ */
+async function analyze(cand: Candidate, slugsInCheckout: () => Set<string>, screen: SyncScreen): Promise<Analysis> {
   const expected = resolveSlugForPath(cand.sourcePath);
-  if (!cand.declared || cand.declared === expected || slugifyPath(cand.declared) === expected) {
-    return { status: 'skip', reason: 'already_clean', message: `${cand.path} no longer declares a conflicting slug; the next gbrain sync --source ${cand.src.id} --no-pull clears its hold.` };
-  }
-  const own = cand.named && ((cand.hold?.page_id !== null && cand.hold?.page_id !== undefined && cand.named.page.id === cand.hold.page_id)
+  const clean = !cand.declared || cand.declared === expected || slugifyPath(cand.declared) === expected;
+  const own = !clean && cand.named && ((cand.hold?.page_id !== null && cand.hold?.page_id !== undefined && cand.named.page.id === cand.hold.page_id)
     || (cand.named.page.source_path != null && cand.named.page.source_path === cand.sourcePath) || (cand.snapshot !== null && cand.named.page.id === cand.snapshot.page.id));
-  if (own) return { status: 'skip', reason: 'already_exempt', message: `The slug: line of ${cand.path} resolves to the file's own page (${cand.named!.page.slug}); nothing to repair.` };
-  const after = () => removeSlugLine(cand.content, cand.sourcePath, cand.path, cand.src.activePack);
+  if (clean || own) {
+    const skip: Analysis = clean ? { status: 'skip', reason: 'already_clean', message: `${cand.path} no longer declares a conflicting slug; the next gbrain sync --source ${cand.src.id} --no-pull clears its hold.` }
+      : { status: 'skip', reason: 'already_exempt', message: `The slug: line of ${cand.path} resolves to the file's own page (${cand.named!.page.slug}); nothing to repair.` };
+    if (!screen || !cand.hold) return skip;
+    const now = await screen(cand, cand.content);
+    if (now.status !== 'refused') return { status: 'import', reason: skip.reason as ImportReason };
+    if (now.refusal.code === 'frontmatter_slug_conflict') return slugPageMismatch(cand, clean ? expected : cand.named!.page.slug, clean ? `but its path derives ${expected}`
+      : `and its slug: line resolves to page ${cand.named!.page.slug} only through an alias or another spelling, while sync compares the line as written with the path-derived slug ${expected}`);
+    return { status: 'held', reason: now.refusal.code, message: `Sync now holds ${cand.path} for ${now.refusal.code}, not for its slug: line; the next gbrain sync --source ${cand.src.id} --no-pull records that hold.` };
+  }
+  const edit = async (rule: DeterministicRule): Promise<Analysis> => {
+    const after = removeSlugLine(cand.content, cand.sourcePath, cand.src.activePack);
+    if (after === null) return { status: 'held', reason: 'still_invalid', message: `Removing the slug: line of ${cand.path} alone does not make it importable (the frontmatter needs other changes too); preview gbrain repair frontmatter --source ${cand.src.id} --only ${cand.path} --include-ambiguous.` };
+    const screened = screen ? await screen(cand, after) : null;
+    if (screened?.status !== 'refused') return { status: 'deterministic', rule, after };
+    if (screened.refusal.code === 'frontmatter_slug_conflict') return slugPageMismatch(cand, expected, `but its path derives ${expected}`);
+    return { status: 'held', reason: 'still_invalid', message: `Removing the slug: line of ${cand.path} would leave it held for ${screened.refusal.code}; preview gbrain repair frontmatter --source ${cand.src.id} --only ${cand.path} --include-ambiguous.` };
+  };
   if (!cand.named) {
-    const inCheckout = lookupSlugs(cand.declared).some(slug => slugsInCheckout().has(slug));
-    if (!inCheckout) {
-      const edited = after();
-      return edited === null ? { status: 'held', reason: 'still_invalid', message: `Removing the slug: line of ${cand.path} alone does not make it importable (the frontmatter needs other changes too); preview gbrain repair frontmatter --source ${cand.src.id} --only ${cand.path} --include-ambiguous.` }
-        : { status: 'deterministic', rule: 'absent_page', after: edited };
-    }
+    if (!lookupSlugs(cand.declared).some(slug => slugsInCheckout().has(slug))) return edit('absent_page');
   } else {
     const parsed = parseMarkdown(cand.content, cand.path, cand.src.activePack ? { activePack: cand.src.activePack } : undefined);
     const shared = [...titleTokens(parsed.title)].some(token => titleTokens(cand.named!.page.title ?? '').has(token));
-    if (parsed.type !== cand.named.page.type && !shared) {
-      const edited = after();
-      return edited === null ? { status: 'held', reason: 'still_invalid', message: `Removing the slug: line of ${cand.path} alone does not make it importable (the frontmatter needs other changes too); preview gbrain repair frontmatter --source ${cand.src.id} --only ${cand.path} --include-ambiguous.` }
-        : { status: 'deterministic', rule: 'different_type', after: edited };
-    }
+    if (parsed.type !== cand.named.page.type && !shared) return edit('different_type');
   }
-  if (after() === null) return { status: 'held', reason: 'still_invalid', message: `Removing the slug: line of ${cand.path} alone would not make it importable, so no model is asked; preview gbrain repair frontmatter --source ${cand.src.id} --only ${cand.path} --include-ambiguous.` };
+  if (removeSlugLine(cand.content, cand.sourcePath, cand.src.activePack) === null) return { status: 'held', reason: 'still_invalid', message: `Removing the slug: line of ${cand.path} alone would not make it importable, so no model is asked; preview gbrain repair frontmatter --source ${cand.src.id} --only ${cand.path} --include-ambiguous.` };
   const held = judgmentParticipant({ path: cand.path, slug: cand.slug, content: cand.content, otherSlug: cand.namedSlug });
   const named = cand.named ? judgmentParticipant({ path: cand.named.page.source_path ?? null, slug: cand.named.page.slug, content: pageContent(cand.named), otherSlug: cand.slug, type: cand.named.page.type }) : null;
   return { status: 'llm', input: { held, named, reason: 'frontmatter_slug_conflict' } };
@@ -348,6 +386,7 @@ export const slugConflictsRepair: RepairHandler = {
     const held: HeldEntry[] = [];
     const skipped: SlugConflictsPreviewDetails['skipped'] = [];
     const llmItems: SlugConflictsPreviewDetails['llm_items'] = [];
+    const imports: SlugConflictsPreviewDetails['imports'] = [];
     let unpricedWarned = false;
     for (const sourceId of scope.source_ids) {
       const src = await loadFenceSource(engine, sourceId, { remote: opts?.remote !== false, work: 'content repair' });
@@ -356,6 +395,7 @@ export const slugConflictsRepair: RepairHandler = {
       warnings.push(...unknown.map(path => `--only ${path}: no held or conflicting file at that path in ${sourceId}; check the source-relative path.`));
       let slugs: Set<string> | null = null;
       const slugsInCheckout = () => (slugs ??= src.root ? checkoutSlugs(src.root) : new Set<string>());
+      const screen = await syncScreen(engine, src);
       for (const path of paths) {
         const name = `${sourceId}:${path}`;
         const keep = async (entry: Omit<HeldEntry, 'item'>, state?: Omit<ContentHoldRepairState, 'at'>) => {
@@ -375,12 +415,20 @@ export const slugConflictsRepair: RepairHandler = {
           continue;
         }
         const cand = read.cand;
-        const analysis = analyze(cand, slugsInCheckout);
+        const analysis = await analyze(cand, slugsInCheckout, screen);
         if (analysis.status === 'skip') { skip(analysis.reason); continue; }
-        if (analysis.status === 'held') { await keep({ reason: analysis.reason, tier: 'manual', resolution: analysis.message }, { action: 'remove_slug', reason: analysis.reason, next_attempt_after: null }); continue; }
+        if (analysis.status === 'held') {
+          await keep({ reason: analysis.reason, tier: 'manual', resolution: analysis.message }, { action: 'remove_slug', reason: analysis.reason, ...(analysis.named ? { named: analysis.named } : {}), next_attempt_after: null });
+          continue;
+        }
         const base: Omit<ApprovedConflict, 'tier' | 'rule' | 'after' | 'estimate_usd' | 'llm_waiting'> = { source_id: src.id, path, source_path: cand.sourcePath, slug: cand.slug, mode: src.managed ? 'managed' : 'legacy',
           page_id: cand.snapshot?.page.id ?? null, revision: cand.snapshot?.revision ?? null, before: cand.before, upstream_version: cand.hold?.upstream_version ?? null, held: cand.hold !== null,
-          named: cand.namedSlug, named_page_id: cand.named?.page.id ?? null, named_sha256: cand.named ? sha256(pageContent(cand.named)) : null };
+          observed_at: cand.hold?.observed_at ?? null, named: cand.namedSlug, named_page_id: cand.named?.page.id ?? null, named_sha256: cand.named ? sha256(pageContent(cand.named)) : null };
+        if (analysis.status === 'import') {
+          approved.push({ ...base, tier: 'deterministic', rule: analysis.reason, after: cand.before, estimate_usd: 0, llm_waiting: 0 });
+          imports.push({ item: name, reason: analysis.reason });
+          continue;
+        }
         if (analysis.status === 'deterministic') {
           approved.push({ ...base, tier: 'deterministic', rule: analysis.rule, after: sha256(Buffer.from(analysis.after, 'utf8')), estimate_usd: 0, llm_waiting: 0 });
           diffs.push({ item: name, rule: analysis.rule, diff: lineDiff(path, cand.content, analysis.after) });
@@ -419,7 +467,8 @@ export const slugConflictsRepair: RepairHandler = {
     const hash = previewHash({ kind: 'slug-conflicts-v1', brain_id: scope.brain_id, sources: sourcesRows, selection, items: approved });
     if (approved.length && !opts?.apply) await saveApprovedSet<ApprovedSetItem>(engine, { command: 'slug-conflicts', hash }, approved.map(entry => ({ ...entry, selection })));
     const listing: RepairListing[] = [
-      ...approved.map(entry => ({ item: itemName(entry), class: entry.tier, detail: entry.tier === 'deterministic' ? `remove_slug (${entry.rule}): the slug: line is removed; the path decides the slug`
+      ...approved.map(entry => ({ item: itemName(entry), class: isImport(entry) ? 'import' : entry.tier, detail: isImport(entry) ? `import (${entry.rule}): sync would import the file as it is, so it is imported unchanged and its hold clears`
+        : entry.tier === 'deterministic' ? `remove_slug (${entry.rule}): the slug: line is removed; the path decides the slug`
         : `model decides (${s.model}) at apply time: remove_slug, merge_into ${entry.named ?? '?'} or needs_human; est. $${entry.estimate_usd.toFixed(4)}` })),
       ...held.map(entry => ({ item: entry.item, class: entry.reason, detail: entry.resolution })),
       ...skipped.map(entry => ({ item: entry.item, class: entry.reason })),
@@ -430,7 +479,7 @@ export const slugConflictsRepair: RepairHandler = {
       why: `Applies exactly the ${approved.length} previewed slug-conflict repair(s)${llmItems.length ? `, ${llmItems.length} of them judged by the model (estimated $${llmUsd.toFixed(4)}; a recommended merge or an undecidable pair writes nothing and is recorded on the hold)` : ''}; a file that changed since this preview is skipped.`,
       verify: { argv: ['gbrain', 'sources', 'status', ...(scope.source_ids.length === 1 ? [scope.source_ids[0]!] : []), '--json'] } }] : [];
     const counts = { deterministic: approved.filter(e => e.tier === 'deterministic').length, llm: llmItems.length, held: held.length, skipped: skipped.length };
-    const details: SlugConflictsPreviewDetails = { counts, model: s.llmEnabled ? s.model : null, llm_enabled: s.llmEnabled, diffs, llm_items: llmItems, held, skipped,
+    const details: SlugConflictsPreviewDetails = { counts, model: s.llmEnabled ? s.model : null, llm_enabled: s.llmEnabled, diffs, imports, llm_items: llmItems, held, skipped,
       caps: { max_usd_per_page: s.perPageUsd, max_usd_per_day: s.perDayUsd, day_remaining_usd: s.dayRemaining, run_max_usd: s.runMaxUsd }, next_actions };
     return { items: approved.map((entry, index) => item(entry, index, null, index === approved.length - 1)), preview_hash: hash, residuals, listing,
       ...(warnings.length ? { warnings } : {}), details: details as unknown as Record<string, unknown>, llm: { usd: llmUsd, cap_remaining_usd: s.llmEnabled ? s.dayRemaining : 0 } };
@@ -454,6 +503,7 @@ export const slugConflictsRepair: RepairHandler = {
     const shown = opts.diff ? d.diffs : d.diffs.slice(0, 1);
     for (const diff of shown) lines.push(`  deterministic: ${diff.item} (remove_slug, ${diff.rule})`, ...diff.diff.split('\n').map(line => `    ${line}`));
     if (!opts.diff && d.diffs.length > shown.length) lines.push(`  (one sample diff; --diff or --json shows all ${d.diffs.length})`);
+    for (const entry of d.imports ?? []) lines.push(`  import: ${entry.item} (${entry.reason}): sync would import it as it is; it is imported unchanged and its hold clears`);
     for (const llm of d.llm_items) lines.push(`  model decides: ${llm.item}${llm.named ? ` vs page ${llm.named}` : ' (no page has the named slug)'}: remove_slug, merge_into or needs_human at apply time; est. $${llm.estimate_usd.toFixed(4)}`);
     for (const h of d.held) lines.push(`  held ${h.item} [${h.reason}]: ${h.resolution}`);
     for (const s of d.skipped) lines.push(`  skipped ${s.item} [${s.reason}]`);
@@ -496,42 +546,64 @@ async function applyConflict(ctx: OperationContext, entry: ApprovedConflict, opt
     return skipped(moved, `${entry.path} or the page its slug: line names changed since it was ${opts.expect ? 'previewed' : 'read'}; preview again with ${shellQuote(contentPreviewArgv(src.id, entry.path))}.`);
   }
   let slugs: Set<string> | null = null;
-  const analysis = analyze(cand, () => (slugs ??= src.root ? checkoutSlugs(src.root) : new Set<string>()));
+  const analysis = await analyze(cand, () => (slugs ??= src.root ? checkoutSlugs(src.root) : new Set<string>()), await syncScreen(engine, src));
   if (analysis.status === 'skip') return skipped(analysis.reason, analysis.message);
-  if (analysis.status === 'held') return held(analysis.reason, analysis.message, { action: 'remove_slug', reason: analysis.reason, next_attempt_after: null });
+  if (analysis.status === 'held') return held(analysis.reason, analysis.message, { action: 'remove_slug', reason: analysis.reason, ...(analysis.named ? { named: analysis.named } : {}), next_attempt_after: null });
+  if (analysis.status === 'import') {
+    // #6696 C8: the clear is bound to the hold observation the plan read; a hold a sync wrote since is kept and retried.
+    if (opts.expect && cand.hold?.observed_at !== entry.observed_at) {
+      await recordState(engine, cand, { action: 'pending', reason: 'changed_since_read', next_attempt_after: nextAttempt('changed_since_read') });
+      return skipped(moved, `A sync observed ${entry.path} again after it was previewed, so its newer hold is kept; the next run reads that hold and imports the file the same way.`);
+    }
+    return write(ctx, src, cand, cand.content, { action: 'import', tier: 'deterministic', confidence: 'high', model: null, cost_usd: 0 }, opts, held, { reason: analysis.reason }, cand.hold!.observed_at);
+  }
   if (analysis.status === 'deterministic') {
     if (opts.expect && sha256(Buffer.from(analysis.after, 'utf8')) !== entry.after) return skipped('changed_since_preview', `The repair of ${entry.path} differs from the preview; preview again.`);
-    return write(ctx, src, cand, analysis.after, { tier: 'deterministic', confidence: 'high', model: null, cost_usd: 0 }, opts, held, { rule: analysis.rule });
+    return write(ctx, src, cand, analysis.after, { action: 'remove_slug', tier: 'deterministic', confidence: 'high', model: null, cost_usd: 0 }, opts, held, { rule: analysis.rule });
   }
   return judge(ctx, src, cand, analysis.input, entry, opts, held);
 }
 
 type HeldFn = (reason: string, message: string, state: Omit<ContentHoldRepairState, 'at'> | null, extra?: Record<string, unknown>) => Promise<RepairItemOutcome>;
 
-/** Writes the edited file through the source's path with its receipt; the hold clears in the same write (managed) or right after the import (legacy). */
-async function write(ctx: OperationContext, src: FenceSource, cand: Candidate, after: string, parts: Pick<ContentRepairReceipt, 'tier' | 'confidence' | 'model' | 'cost_usd'>, opts: ApplyOptions, held: HeldFn,
-  extra: Record<string, unknown>): Promise<RepairItemOutcome> {
+/**
+ * Writes the edited file through the source's path with its receipt; the hold clears in the same write (managed) or right after the import (legacy).
+ * #6696 C8: `import` writes no file: the held bytes are imported as they are, and the hold clears only while it is still the observation
+ * `observedAt` the repair read (a hold a sync wrote since is kept, with a retry recorded on it).
+ */
+async function write(ctx: OperationContext, src: FenceSource, cand: Candidate, after: string, parts: Pick<ContentRepairReceipt, 'action' | 'tier' | 'confidence' | 'model' | 'cost_usd'>, opts: ApplyOptions, held: HeldFn,
+  extra: Record<string, unknown>, observedAt?: string): Promise<RepairItemOutcome> {
   const engine = ctx.engine;
   const local = { ...ctx, remote: false, sourceId: src.id } as OperationContext;
-  const receipt: ContentRepairReceipt = { actor: CONTENT_REPAIR_ACTOR, hold_code: CONTENT_REPAIR_HOLD_CODE, action: 'remove_slug', ...parts, before_sha256: cand.before, after_sha256: sha256(Buffer.from(after, 'utf8')) };
-  const detail = { path: cand.path, slug: cand.slug, action: 'remove_slug', tier: parts.tier, confidence: parts.confidence, ...(cand.namedSlug ? { named: cand.namedSlug } : {}), ...extra };
+  const receipt: ContentRepairReceipt = { actor: CONTENT_REPAIR_ACTOR, hold_code: CONTENT_REPAIR_HOLD_CODE, ...parts, before_sha256: cand.before, after_sha256: sha256(Buffer.from(after, 'utf8')) };
+  const detail = { path: cand.path, slug: cand.slug, action: parts.action, tier: parts.tier, confidence: parts.confidence, ...(cand.namedSlug ? { named: cand.namedSlug } : {}), ...extra };
   const spend = parts.cost_usd ? { llm_usd: parts.cost_usd } : {};
+  const what = parts.action === 'import' ? `${cand.path} as it is` : `the repaired ${cand.path}`;
+  const refused = (code: string, how: string, reason = code) => code === 'frontmatter_slug_conflict'
+    ? held('slug_page_mismatch', `Importing ${what} would still be held: sync files it as page ${cand.slug}, but its path derives ${resolveSlugForPath(cand.sourcePath)}, ${how}. `
+      + `By hand: make the slug: line name ${cand.slug} exactly or move the file to the path that derives ${cand.slug}, commit, and run gbrain sync --source ${src.id} --no-pull.`,
+      { action: 'remove_slug', reason: 'slug_page_mismatch', named: resolveSlugForPath(cand.sourcePath), next_attempt_after: null }, spend)
+    : held(reason, `Importing ${what} would be refused (${code}), ${how}.`, { action: 'remove_slug', reason: 'still_invalid', next_attempt_after: null }, spend);
+  const kept = async (cleared: boolean) => {
+    if (!cleared && observedAt && cand.hold) await recordState(engine, cand, { action: 'pending', reason: 'changed_since_read', next_attempt_after: nextAttempt('changed_since_read') });
+    return cleared;
+  };
   if (src.managed) {
     const config = await repairScreenConfig(engine, src.id);
     const publication = await prepareRepairPublication(engine, { sourceId: src.id, slug: cand.slug, sourcePath: cand.sourcePath, path: cand.path, root: src.root!, content: after,
       snapshot: cand.snapshot, base: cand.snapshot, ...config });
-    if (publication.status === 'refused') return held(publication.refusal.code === 'frontmatter_slug_conflict' ? 'still_invalid' : publication.refusal.code, `Importing the repaired ${cand.path} would be refused (${publication.refusal.code}), so nothing was written.`,
-      { action: 'remove_slug', reason: 'still_invalid', next_attempt_after: null }, spend);
-    if (publication.status === 'overlay') return held('canonical_overlay', `Importing the repaired ${cand.path} would keep page data the file does not carry (tags added outside the file, a withdrawal or sanitized text), so nothing was written. `
+    if (publication.status === 'refused') return refused(publication.refusal.code, 'so nothing was written');
+    if (publication.status === 'overlay') return held('canonical_overlay', `Importing ${what} would keep page data the file does not carry (tags added outside the file, a withdrawal or sanitized text), so nothing was written. `
       + `Edit the file by hand to carry them (gbrain get --source ${src.id} -- ${cand.slug} shows the page), remove the slug: line, and commit.`, { action: 'remove_slug', reason: 'canonical_overlay', next_attempt_after: null }, spend);
     try {
-      const outcome = await submitManagedFileRepair(local, { sourceId: src.id, requestId: await repairRequestId(local, 'slug-conflicts', { source_id: src.id, slug: cand.slug }, `${receipt.before_sha256}:${receipt.after_sha256}`),
+      const outcome = await submitManagedFileRepair(local, { sourceId: src.id, requestId: await repairRequestId(local, 'slug-conflicts', { source_id: src.id, slug: cand.slug }, `${receipt.before_sha256}:${receipt.after_sha256}${observedAt ? `:${observedAt}` : ''}`),
         slug: cand.slug, path: cand.path, sourcePath: cand.sourcePath, content: after, beforeHash: cand.before, resultDigest: publication.digest,
-        ...(cand.snapshot ? { expected_revision: cand.snapshot.revision } : {}), noEmbed: !opts.embed, contentRepair: receipt });
+        ...(cand.snapshot ? { expected_revision: cand.snapshot.revision } : {}), noEmbed: !opts.embed, contentRepair: receipt, ...(observedAt ? { holdObservedAt: observedAt } : {}) });
       const persistence = outcome.persistence as { git_state?: string } | undefined;
-      return { applied: true, outcome: 'repaired', detail: { ...detail, mode: 'managed', imported: outcome.status, hold_cleared: outcome.hold_cleared === true, committed: persistence?.git_state ?? 'not_requested' }, ...spend };
+      return { applied: true, outcome: 'repaired', detail: { ...detail, mode: 'managed', imported: outcome.status, hold_cleared: await kept(outcome.hold_cleared === true), committed: persistence?.git_state ?? 'not_requested' }, ...spend };
     } catch (error) {
       if (error instanceof OperationError && ['changed_since_preview', 'revision_conflict', 'page_identity_changed', 'source_changed'].includes(error.code)) {
+        await kept(false);
         return { applied: false, outcome: 'skipped', reason: 'changed_since_read', detail: { ...detail, message: `${cand.path} changed while it was being repaired; the next run reads it again.` }, ...spend };
       }
       if (error instanceof OperationError && error.code === 'sync_in_progress') {
@@ -548,14 +620,16 @@ async function write(ctx: OperationContext, src: FenceSource, cand: Candidate, a
     throw error;
   }
   if (sha256(readFileSync(abs)) !== cand.before) return { applied: false, outcome: 'skipped', reason: 'changed_since_read', detail: { ...detail, message: `${cand.path} changed after the repair read it, so nothing was written.` }, ...spend };
-  const backup = createFrontmatterBackup(abs, { sourcePath: root, backupRoot: gbrainPath('backups', 'content-repair', makeFrontmatterBackupRunId()) });
-  writeFileSync(abs, after);
+  const edits = after !== cand.content;
+  const backup = edits ? createFrontmatterBackup(abs, { sourcePath: root, backupRoot: gbrainPath('backups', 'content-repair', makeFrontmatterBackupRunId()) }) : null;
+  if (edits) writeFileSync(abs, after);
   const imported = await importFromFile(engine, abs, cand.sourcePath, { sourceId: src.id, noEmbed: !opts.embed });
   if (imported.status === 'error' || imported.refusal) {
-    writeFileSync(abs, cand.content);
-    return held('still_invalid', `The repaired ${cand.path} did not import (${imported.refusal?.code ?? 'error'}), so the file was restored from its backup.`, { action: 'remove_slug', reason: 'still_invalid', next_attempt_after: null }, spend);
+    if (edits) writeFileSync(abs, cand.content);
+    return refused(imported.refusal?.code ?? 'error', edits ? 'so the file was restored from its backup' : 'so the hold stays', 'still_invalid');
   }
-  const holdCleared = cand.hold ? await clearGitHold(engine, { sourceId: src.id, incarnation: src.incarnation, path: cand.path, observedAt: new Date().toISOString() }) : false;
+  const holdCleared = cand.hold ? await kept(await clearGitHold(engine, { sourceId: src.id, incarnation: src.incarnation, path: cand.path, observedAt: observedAt ?? new Date().toISOString() })) : false;
+  if (!edits) return { applied: true, outcome: 'repaired', detail: { ...detail, mode: 'legacy', imported: imported.status, hold_cleared: holdCleared, content_repair: receipt }, ...spend };
   const commitStep = `git -C ${shellQuote([root])} add -- ${shellQuote([cand.path])} && git -C ${shellQuote([root])} commit -m ${shellQuote([contentRepairCommitSubject(cand.path)])} -m ${shellQuote([contentRepairTrailer(receipt)])} -- ${shellQuote([cand.path])}`;
   return { applied: true, outcome: 'repaired', detail: { ...detail, mode: 'legacy', backup, imported: imported.status, hold_cleared: holdCleared, content_repair: receipt, committed: 'commit_step', commit_step: commitStep }, ...spend };
 }
@@ -578,7 +652,7 @@ async function judge(ctx: OperationContext, src: FenceSource, cand: Candidate, i
   if (!result.ok) {
     const spend = result.spentUsd ? { llm_usd: result.spentUsd } : {};
     if (result.reason === 'claimed_elsewhere') return { applied: false, outcome: 'skipped', reason: 'claimed_elsewhere', detail: { path: cand.path, slug: cand.slug, message: result.message }, ...spend };
-    if (result.memoHit && result.reason === 'remove_slug') return write(ctx, src, cand, removeSlugLine(cand.content, cand.sourcePath, cand.path, src.activePack)!, { tier: 'llm', confidence: 'medium', model, cost_usd: 0 }, opts, held, { memo: 'judged_before' });
+    if (result.memoHit && result.reason === 'remove_slug') return write(ctx, src, cand, removeSlugLine(cand.content, cand.sourcePath, src.activePack)!, { action: 'remove_slug', tier: 'llm', confidence: 'medium', model, cost_usd: 0 }, opts, held, { memo: 'judged_before' });
     if (result.memoHit) {
       const state = cand.hold?.meta.content_repair;
       const out = await held(result.reason, result.message, state && state.reason === result.reason ? null : { action: result.reason === 'merge_recommended' ? 'merge_into' : result.reason === 'content_repair_needs_human' ? 'needs_human' : 'pending',
@@ -604,9 +678,9 @@ async function judge(ctx: OperationContext, src: FenceSource, cand: Candidate, i
   const spend = result.spentUsd ? { llm_usd: result.spentUsd } : {};
   const why = verdict.why ? { why: verdict.why } : {};
   if (verdict.action === 'remove_slug') {
-    const after = removeSlugLine(cand.content, cand.sourcePath, cand.path, src.activePack);
+    const after = removeSlugLine(cand.content, cand.sourcePath, src.activePack);
     if (after === null) { await store.reject(result.claim, { reason: 'still_invalid' }); return held('still_invalid', `The model chose remove_slug for ${cand.path}, but removing the line alone does not make it importable.`, { action: 'remove_slug', reason: 'still_invalid', model, next_attempt_after: null }, { ...why, ...spend }); }
-    const written = await write(ctx, src, cand, after, { tier: 'llm', confidence: 'medium', model, cost_usd: result.spentUsd }, opts, held, why);
+    const written = await write(ctx, src, cand, after, { action: 'remove_slug', tier: 'llm', confidence: 'medium', model, cost_usd: result.spentUsd }, opts, held, why);
     if (written.applied) await store.publish(result.claim);
     else if (written.reason === 'changed_since_read' || written.reason === 'sync_in_progress') await store.transient(result.claim, written.reason);
     else await store.reject(result.claim, { reason: written.reason ?? 'still_invalid' });

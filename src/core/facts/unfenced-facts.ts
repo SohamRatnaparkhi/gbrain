@@ -422,7 +422,7 @@ async function fenceManaged(engine: BrainEngine, plan: UnfencedFactsPlan): Promi
   // older than its own read (the facts-changed-since-planning guard keeps its short window).
   const [first] = authorities.values();
   if (first) await assertLifetimeIdHeadroom(engine, first.writer.principal, groups.size).catch(async (error: unknown) => {
-    if (!(error instanceof OperationError) || error.code !== 'queue_capacity') throw error;
+    if (!(error instanceof OperationError) || !['write_quota_exhausted', 'write_quota_insufficient'].includes(error.code)) throw error;
     let submitting = 0;
     for (const [key, group] of groups) {
       const [sourceId, entitySlug] = key.split('\0');

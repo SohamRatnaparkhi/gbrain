@@ -219,6 +219,10 @@ export async function performFullSync(
     }
   }
 
+  // #6722: a full sync walked every page of the source, so its large and embed_skip pages are all reported.
+  const { readPageSizeStates, addSizeState } = await import('../../core/page-embedding-budget.ts');
+  const sizeStates = (await readPageSizeStates(engine, fullSourceId, null))
+    .reduce<import('../../core/page-embedding-budget.ts').SyncSizeStates | undefined>((tally, state) => addSizeState(tally, state), undefined);
   return {
     status: 'first_sync',
     fromCommit: null,
@@ -230,6 +234,7 @@ export async function performFullSync(
     chunksCreated: result.chunksCreated,
     embedded,
     pagesAffected: [],
+    ...(sizeStates ? { size_states: sizeStates } : {}),
     // Warning aggregates ride the result for worker/JSON consumers — a full
     // sync that only prints to a daemon's stderr hides them from cron
     // topologies (codex re-review; same rationale as the incremental path).

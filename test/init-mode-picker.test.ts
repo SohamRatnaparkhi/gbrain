@@ -217,6 +217,7 @@ describe('cost matrix: newest models, priced from model-pricing', () => {
     const flat = MODE_PICKER_MENU.replace(/\s+/g, ' ');
     expect(flat).toContain('`gbrain query` expands only when the mode says so');
     expect(flat).toContain('`gbrain search` never expands');
+    expect(flat).toContain('`gbrain config set search.expansion false` turns the default off for the brain');
     expect(flat).not.toMatch(/in every mode/);
     expect(MODE_PICKER_MENU).toContain('semantic result caching is temporarily disabled');
     expect(MODE_PICKER_MENU).toContain('gbrain search tune');

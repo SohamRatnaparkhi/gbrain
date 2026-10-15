@@ -95,6 +95,7 @@ export const OPERATION_LOADERS: Record<string, readonly [() => Promise<Record<st
   "get_stats": [load_admin, "adminOperations"],
   "get_health": [load_admin, "adminOperations"],
   "run_doctor": [load_admin, "adminOperations"],
+  "get_brain_health": [load_admin, "adminOperations"],
   "get_versions": [load_admin, "adminOperations"],
   "revert_version": [load_admin, "adminOperations"],
   "get_brain_identity": [load_admin, "adminOperations"],

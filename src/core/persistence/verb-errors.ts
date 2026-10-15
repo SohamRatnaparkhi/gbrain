@@ -29,7 +29,7 @@ export function heldFileDiagnostic(message: string | null | undefined, sourceId 
   // #6188 (D6): a fence hold routes to the fence repair, never to frontmatter repair.
   const repair = held[1] === 'invalid_fence'
     ? `the maintenance run repairs most fence holds by itself; to repair it now, preview with gbrain repair fences --source ${sourceId} (read-only: it names the planned repair or the exact edit) and run the apply command it prints`
-    : `frontmatter holds: preview the fix with gbrain repair frontmatter --source ${sourceId} and apply it; file_too_large: split the file`;
+    : `frontmatter holds: preview the fix with gbrain repair frontmatter --source ${sourceId} and apply it; file_too_large: the file is over the page size limit, so exclude it with sync.exclude or split it into files under the limit`;
   return { reason: held[2] === 'and differs from the page' ? 'file_database_drift' : 'canonical_path_occupied', message: message!,
     suggestion: `Sync holds this page's file because gbrain cannot import it; gbrain sources status ${sourceId} names the file${held[1] === 'invalid_fence' ? ', fence and reason' : ', line and key'}. `
       + 'The page keeps its last good revision and refuses put_page until the file is repaired, so retrying this write refuses the same way. '

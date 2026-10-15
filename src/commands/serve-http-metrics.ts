@@ -18,6 +18,7 @@
  * `mountHealth` serves the public liveness probe; `probeHealth` backs the
  * admin-only full-stats endpoint.
  */
+import { cachedCapacitySnapshot, type CapacitySnapshot } from '../core/persistence/capacity-snapshot.ts';
 import type { Express, NextFunction, Request, RequestHandler, Response } from 'express';
 import type { BrainEngine } from '../core/engine.ts';
 import { resolveInflightTimeoutSeconds, resolveSessionTimeouts } from '../core/db.ts';
@@ -119,6 +120,30 @@ export function cachedTerminalSummary(engine: BrainEngine, now: number = Date.no
     .catch((error): TerminalSummary => ({ status: 'unknown', window_days: 0, reason: error instanceof Error ? error.message : String(error) }));
   terminalSummaries.set(engine, { at: now, summary });
   return summary;
+}
+
+/**
+ * #6696 (A4): cumulative write-cap gauges from the 60 s capacity snapshot (never a forecast per scrape): use, cap and
+ * days left per scope and resource. Alert rule: docs/guides/concurrent-writes.md#quota-near-exhaustion.
+ */
+export function renderCapacityMetrics(snapshot: CapacitySnapshot): string {
+  if (snapshot.status !== 'ok' || !snapshot.rows.length) return '';
+  const label = (value: string) => value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('\n', '\\n');
+  const lines: string[] = [];
+  const series: Array<[string, string, (row: CapacitySnapshot['rows'][number]) => number | null]> = [
+    ['used', 'Cumulative managed-write use (request ids or reserved receipt bytes).', row => row.used],
+    ['limit', 'The configured cumulative cap.', row => row.limit],
+    ['days_to_exhaustion', 'Days until admission refuses at the 7-day rate (absent when the rate is zero or beyond ten years).', row => row.days_to_exhaustion],
+  ];
+  for (const [name, help, value] of series) {
+    lines.push(`# HELP gbrain_write_capacity_${name} ${help}`, `# TYPE gbrain_write_capacity_${name} gauge`);
+    for (const row of snapshot.rows) {
+      const v = value(row);
+      if (v !== null) lines.push(`gbrain_write_capacity_${name}{scope="${label(row.scope)}",resource="${row.resource}"} ${v}`);
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
 }
 
 export function renderPrometheusMetrics(
@@ -367,7 +392,8 @@ export function mountMetrics(app: Express, ctx: ServeHttpContext): void {
   // is not a public surface (the original PR served it unauthenticated).
   app.get('/metrics', requireAdmin, async (_req: Request, res: Response) => {
     const summary = await cachedTerminalSummary(ctx.engine);
+    const capacity = await cachedCapacitySnapshot(ctx.engine);
     res.set('Content-Type', 'text/plain; version=0.0.4');
-    res.send(renderPrometheusMetrics(metricsCounters) + renderTerminalFailureMetrics(summary));
+    res.send(renderPrometheusMetrics(metricsCounters) + renderTerminalFailureMetrics(summary) + renderCapacityMetrics(capacity));
   });
 }

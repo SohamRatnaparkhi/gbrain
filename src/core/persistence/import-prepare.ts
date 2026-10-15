@@ -4,13 +4,13 @@ import type { BrainEngine } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import type { Page } from '../types.ts';
 import { ownerGateInput, ownerImportTrust } from '../trust/channel.ts';
-import { importCodeFile, importFromContent, importImageFile, isImageFilePath, MAX_FILE_SIZE, MAX_IMAGE_BYTES, verifyPageReadable } from '../import-file.ts';
+import { importCodeFile, importFromContent, importImageFile, isImageFilePath, MAX_IMAGE_BYTES, verifyPageReadable } from '../import-file.ts';
 import { parseMarkdown, serializePageToMarkdown } from '../markdown.ts';
 import { applyInference } from '../frontmatter-inference.ts';
 import { getCompanyBrainProfile } from '../company-brain/profile.ts';
 import { hasMalformedPathSegment, isCodeFilePath, slugifyCodePath, slugifyPath } from '../sync.ts';
 import { OperationError, opError } from '../ops/contract.ts';
-import { contentRefusalError, screenImportContent, type ContentRefusal } from '../import-screen.ts';
+import { contentRefusalError, importSizeLimit, screenImportContent, type ContentRefusal } from '../import-screen.ts';
 import { fenceWhere } from '../fence-repair/refusal.ts';
 import { pageFencesNormalized } from '../fence-repair/report.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
@@ -51,9 +51,9 @@ export function readImportBytes(path: string): Buffer {
     throw opError('source_changed', 'Managed import refuses symlinked files or ancestors. Use the real source path.',
       `${path} is a symlink or sits under one, so it was not imported. Import the file at its real location (or copy it into the source) instead.`);
   }
-  const maxBytes = isImageFilePath(path) ? MAX_IMAGE_BYTES : MAX_FILE_SIZE;
+  const maxBytes = isImageFilePath(path) ? MAX_IMAGE_BYTES : importSizeLimit(path);
   if (lstatSync(path).size > maxBytes) throw opError('invalid_params', `File too large (max ${maxBytes} bytes).`,
-    `${basename(path)} is over the ${maxBytes}-byte import limit and was not imported. Split it into smaller files or leave it out of the import.`);
+    `${basename(path)} is over the ${maxBytes}-byte import limit and was not imported. Files under the limit import normally; leave this one out of the import, or split it into files under the limit.`);
   return readFileSync(path);
 }
 
@@ -63,7 +63,7 @@ function managedImportRefusal(refusal: ContentRefusal, sourcePath: string): Oper
     ? `Edit ${fenceWhere(refusal.fence)} in ${sourcePath} as the message says (the rest of the page is fine), then import it again.`
     : refusal.code === 'frontmatter_slug_conflict'
     ? `In ${sourcePath}, remove the frontmatter slug or set it to the path-derived slug (the path decides the slug), or move the file to the path that matches its slug, then import again.`
-    : refusal.code === 'file_too_large' ? `${sourcePath} is over the import size limit and was not imported. Split it into smaller files or leave it out of the import.`
+    : refusal.code === 'file_too_large' ? `${sourcePath} is over the size limit the message names and was not imported. Every page under the limit imports and is searchable; leave this file out of the import, or split it into files under the limit.`
     : refusal.code === 'content_rejected' ? `Remove the matched junk from ${sourcePath}, then import it again.`
     : refusal.code === 'write_gate_rejected' ? `The write gate refuses ${sourcePath} (external instruction-like content under write_gate.external_mode=reject); tell the user, the decision is theirs.`
     : `Fix line ${refusal.line ?? '?'} of ${sourcePath}${refusal.key ? ` (key "${refusal.key}")` : ''}: one line per key with its whole value quoted. Run gbrain frontmatter validate on the file to see every problem, then import it again.`;

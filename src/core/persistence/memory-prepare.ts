@@ -148,10 +148,13 @@ export async function prepareMemoryMutation(engine: BrainEngine, row: WriteReque
     const target = await normalizeTargetFences(engine, { sourceId: row.source_id, slug: row.slug, kind: 'facts', page: snapshot.page });
     if (target.fixes.length) fencesNormalized = { fences_normalized: pageFencesNormalized({ sourceId: row.source_id, slug: row.slug, fixes: target.fixes,
       writer: row.principal_kind, path: snapshot.page.source_path ?? null, remote: row.authority.remote }) };
+    // #6696 C9: a facts row the fence does not hold (extraction, a hand edit) still owns its row_num, so the new row numbers past both.
+    const [indexed] = await engine.executeRaw<{ n: number }>('SELECT COALESCE(MAX(row_num),0)::int AS n FROM facts WHERE source_id=$1 AND source_markdown_slug=$2', [row.source_id, row.slug]);
     // #6385 R12: an entity fence that does not parse cleanly refuses typed instead of losing the rows it skipped.
     const appended = refuseUnparsedRewrite(target.page, row.slug, row.source_id, () => upsertFactRow(target.page.compiled_truth, {
       claim: input.fact, kind: input.kind, visibility: input.visibility, confidence: 1, notability: 'medium', validFrom: formatFenceDate(validFrom),
-      validUntil: validUntil ? formatFenceDate(validUntil) : undefined, source: fact.source, context }));
+      validUntil: validUntil ? formatFenceDate(validUntil) : undefined, source: fact.source, context,
+      rowNum: Math.max(indexed?.n ?? 0, ...parseFactsFence(target.page.compiled_truth).facts.map(f => f.rowNum)) + 1 }));
     rowNum = appended.rowNum;
     let body = appended.body;
     const old = decision.candidate;
@@ -169,13 +172,16 @@ export async function prepareMemoryMutation(engine: BrainEngine, row: WriteReque
     if (page.observedRevision !== observedRevision) conflict(row);
   }
   return { observedRevision, file: page?.file, ...(page?.exclusiveSources ? { exclusiveSources: page.exclusiveSources } : {}), validate: async tx => { await validate(tx); await page?.validate?.(tx); }, apply: async tx => {
-    if (page) await withPageTierKept(tx, { sourceId: row.source_id, slug: row.slug }, () => page!.apply(tx));
+    const pageReceipt = page ? await withPageTierKept(tx, { sourceId: row.source_id, slug: row.slug }, () => page!.apply(tx)) as { size_state?: unknown } | undefined : undefined;
     let id: number;
     if (rowNum !== undefined) {
       const inserted = await tx.insertFacts([{ ...fact, row_num: rowNum, source_markdown_slug: row.slug }], { source_id: row.source_id }); // gbrain-allow-direct-insert: coordinator atomically publishes the prepared canonical fact fence and its new indexed row
       if (inserted.ids.length !== 1) {
+        const [occupant] = await tx.executeRaw<{ id: number }>('SELECT id FROM facts WHERE source_id=$1 AND source_markdown_slug=$2 AND row_num=$3', [row.source_id, row.slug, rowNum]);
         throw opError('storage_error', 'The new canonical fact row was not indexed.',
-          `The fact row for request ${row.request_id} in source ${row.source_id} was not indexed, so its transaction rolled back. Inspect the request before remembering again; if it repeats, run gbrain doctor --json and report it to the user.`,
+          `The fact row for request ${row.request_id} in source ${row.source_id} was not indexed, so its transaction rolled back.`
+          + (occupant ? ` Row ${rowNum} of ${row.slug} is already held by fact ${occupant.id}.` : '')
+          + ' Inspect the request before remembering again; if it repeats, run gbrain doctor --json and report it to the user.',
           { fix: receiptFix(row) });
       }
       id = inserted.ids[0];
@@ -192,6 +198,7 @@ export async function prepareMemoryMutation(engine: BrainEngine, row: WriteReque
     const superseded = status === 'superseded' ? decision.candidate! : undefined;
     return { ...outcome(id, status, input.entity_slug, validUntil, degraded, p, superseded?.id,
       superseded !== undefined && superseded.entity_slug == null && input.entity_slug !== null), ...fencesNormalized,
-      ...(contestedBy ? { contested: contestedBy } : {}), ...(flagged ? { gate: flagged } : {}) };
+      ...(contestedBy ? { contested: contestedBy } : {}), ...(flagged ? { gate: flagged } : {}),
+      ...(pageReceipt?.size_state ? { size_state: pageReceipt.size_state } : {}) };
   } };
 }

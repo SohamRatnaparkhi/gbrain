@@ -1,6 +1,7 @@
 import { noteForwardProgress } from '../core/forward-progress.ts';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type { Readable, Writable } from 'node:stream';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { BrainEngine } from '../core/engine.ts';
 import { opError, type OperationMeta } from '../core/ops/contract.ts';
@@ -25,6 +26,20 @@ import { readLocalWriter, verifyLocalWriter } from '../core/persistence/identity
 import { resolveWritebackConfig, ambientOptsFrom } from '../core/facts/writeback-config.ts';
 import { isEngineDegraded, onEngineRecovered } from '../core/degraded-marker.ts';
 import { assertStdioSourceBindable } from './source-preflight.ts';
+
+/**
+ * Largest JSON-RPC message the stdio server reads (the SDK default is 10 MiB,
+ * and an oversized message closes the session). A page at the 24 MiB ceiling
+ * travels JSON-escaped, and newlines and quotes double, so 64 MiB carries it
+ * with room; the persistence journal caps a principal's outstanding intents at
+ * the same 64 MiB.
+ */
+export const MCP_STDIO_MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
+
+/** The stdio transport `gbrain serve` connects, sized for ceiling-size page writes. */
+export function mcpStdioTransport(stdin: Readable = process.stdin, stdout: Writable = process.stdout): StdioServerTransport {
+  return new StdioServerTransport(stdin, stdout, { maxBufferSize: MCP_STDIO_MAX_MESSAGE_BYTES });
+}
 
 // initialize and tools/list read OPERATION_MANIFEST; the handler graph behind
 // dispatch.ts (src/core/operations.ts, ~760 modules) loads with the deferred
@@ -459,7 +474,7 @@ export async function startMcpServer(engine: BrainEngine, opts: { surface?: McpS
       OPERATION_MANIFEST.find(o => o.name === name)?.mutating === true,
     );
     return finishResult(await dispatchToolCall(engine, name, params, {
-      remote: true,
+      remote: true, admissionOrigin: 'interactive',
       // #1061: mark the transport so whoami can report {transport: 'stdio'}
       // instead of throwing unknown_transport. Trust posture unchanged —
       // stdio stays remote/untrusted.
@@ -491,7 +506,7 @@ export async function startMcpServer(engine: BrainEngine, opts: { surface?: McpS
     }), dispatchRenderContext);
   }));
 
-  const transport = new StdioServerTransport();
+  const transport = mcpStdioTransport();
   bootPhase('mcp_connect');
   await server.connect(transport);
 
@@ -622,6 +637,7 @@ export async function handleToolCall(
 
   const ctx = buildOperationContext(engine, params, {
     remote: false,
+    admissionOrigin: 'interactive',
     logger: { info: console.log, warn: console.warn, error: console.error },
     ...(opts?.sourceId ? { sourceId: opts.sourceId } : {}),
     ...(opts?.writeWaitMs !== undefined ? { writeWaitMs: opts.writeWaitMs } : {}),

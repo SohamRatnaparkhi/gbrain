@@ -29,6 +29,7 @@ export const WRITER_NEXT_ACTIONS: Record<string, string> = {
   recovery_required: 'Inspect the recorded publication fingerprints on the designated owner and settle recovery before publishing this worktree.',
   recovery_capacity: 'Allow recovery to settle or increase the applicable persistence.limits recovery byte cap. Do not remove recovery records.',
   queue_capacity: 'Let outstanding requests finish or increase the applicable persistence.limits cap. Accepted request IDs are never evicted.',
+  write_quota_exhausted: 'Raise the cumulative cap the refusal names with gbrain config set on the brain host (gbrain doctor --only persistence_capacity --json prints the value), then retry with the same request_id. Accepted request IDs are never evicted.',
   consumer_stopping: 'Restart the resident owner and inspect the same request_id before resubmitting.',
   source_changed: 'Inspect the source incarnation and worktree binding; queued requests cannot follow a recreated source.',
   permission_denied: 'Inspect the durable principal and current source, operation, and namespace grants.',

@@ -26,7 +26,12 @@
  * `--all-drifted` takes every page the conflict audit finds still drifted. It
  * refuses a selection that mixes drift classes unless `--class <name>` keeps
  * exactly one, so one `--prefer` never resolves differently shaped drift in bulk.
- * Trusted local CLI only.
+ * #6696 C7: repeatable `--only` / `--skip` over the canonical file path,
+ * source-relative: an exact path, or a glob (`*` within a segment, `**` across
+ * segments; `path-glob.ts`, file-drift being the only kind that takes globs),
+ * narrow the selection before the class check, the bound and any preview
+ * work; they are part of the selection digest (so of the plan hash) and of
+ * every printed preview and apply command. Trusted local CLI only.
  */
 import { randomUUID } from 'node:crypto';
 import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -37,6 +42,8 @@ import { flushDirectory } from '../fs-durable.ts';
 import { OperationError, opError } from '../ops/contract.ts';
 import { readFix, trustedCliRequired } from '../ops/op-fix.ts';
 import { validateSlug } from '../utils.ts';
+import { matchesRepairPath } from './path-glob.ts';
+import { shellQuote } from '../agent-output.ts';
 import type { ParsedPage } from '../import-file.ts';
 import { digest, stableJson } from '../persistence/digest.ts';
 import { currentVerifiedLocalWriter, readLocalWriter, withVerifiedLocalRegistration } from '../persistence/identity.ts';
@@ -56,7 +63,8 @@ export type DriftSide = 'file' | 'database';
 export interface DriftException { path: string; reason: 'protected_metadata' | 'scan_state' | 'tags_union' | 'protected_takes_or_private_facts' | 'canonical_import' }
 interface ApprovedPage { source_id: string; slug: string; artifact_digest: string; selection: string }
 interface DriftItem extends RepairItem { page: ApprovedPage; hash: string; last: boolean }
-interface ArtifactPage { slug: string; prefer: DriftSide; class?: DriftClass; adopt_slug_path: boolean; exceptions: DriftException[]; result: ParsedPage; preview: ReconcileArtifact }
+/** One page's prepared resolution: the ready reconcile preview its apply submits, and where it departs from the preferred side. */
+export interface ArtifactPage { slug: string; prefer: DriftSide; class?: DriftClass; adopt_slug_path: boolean; exceptions: DriftException[]; result: ParsedPage; preview: ReconcileArtifact }
 
 const ALL_DRIFTED_LIMIT = 1000;
 const TOP_FIELDS = ['title', 'type', 'compiled_truth', 'timeline'] as const;
@@ -66,8 +74,14 @@ const escapePointer = (key: string) => key.replace(/~/g, '~0').replace(/\//g, '~
 function previewCommand(sourceId: string, opts: RepairPlanOptions): string {
   const select = opts.allDrifted ? ` --all-drifted${opts.driftClass ? ` --class ${opts.driftClass}` : ''}`
     : [...(opts.slugs ?? []).map(slug => ` --slug ${slug}`), ...(opts.requests ?? []).map(id => ` --request ${id}`)].join('');
-  return `gbrain repair file-drift --source ${sourceId}${select} --prefer ${opts.prefer ?? '<file|database>'}`;
+  const globs = [...(opts.only ?? []).flatMap(glob => ['--only', glob]), ...(opts.skip ?? []).flatMap(glob => ['--skip', glob])];
+  return `gbrain repair file-drift --source ${sourceId}${select}${globs.length ? ` ${shellQuote(globs)}` : ''} --prefer ${opts.prefer ?? '<file|database>'}`;
 }
+
+/** Whether a canonical file path passes the `--only` / `--skip` globs (no `--only`: every path; an unknown path only then). */
+const selectedByGlobs = (path: string | undefined, opts: Pick<RepairPlanOptions, 'only' | 'skip'>) =>
+  path === undefined ? !opts.only?.length && !opts.skip?.length
+    : (!opts.only?.length || matchesRepairPath(path, opts.only)) && !matchesRepairPath(path, opts.skip);
 
 /** The reconcile decisions that make the preferred side win every field reconcile lets a decision choose. */
 export function preferSideDecisions(file: ParsedPage, database: ParsedPage, prefer: DriftSide): ReconcileDecision[] {
@@ -139,15 +153,25 @@ function readArtifact(hash: string, command: string): Map<string, ArtifactPage> 
   } catch { throw previewChangedError(hash, command); }
 }
 
-/** The slugs the selection names: exact slugs, the slugs of named conflict receipts, or every page the audit finds still drifted. */
-async function selectSlugs(engine: BrainEngine, sourceId: string, opts: RepairPlanOptions): Promise<{ slugs: string[]; classes: Map<string, DriftClass> }> {
+/**
+ * The slugs the selection names: exact slugs, the slugs of named conflict receipts, or every page the audit finds
+ * still drifted. `--all-drifted` is narrowed here by the `--only` / `--skip` globs over each page's canonical file
+ * path (`not_selected` counts the pages they leave out), before the class check and the bound; an exact selection
+ * is narrowed by the plan from the same live check.
+ */
+async function selectSlugs(engine: BrainEngine, sourceId: string, opts: RepairPlanOptions): Promise<{ slugs: string[]; classes: Map<string, DriftClass>; notSelected: number }> {
   const classes = new Map<string, DriftClass>();
   if (opts.allDrifted) {
     const drifted: string[] = [];
+    let notSelected = 0;
     let cursor: string | undefined;
     do {
       const page = await auditDriftConflicts(engine, sourceId, { trusted: true, excludePrivate: false }, { limit: 100, cursor });
-      for (const row of page.conflicts) if (row.still_present.value === true) { drifted.push(row.slug); classes.set(row.slug, row.class ?? 'error'); }
+      for (const row of page.conflicts) {
+        if (row.still_present.value !== true) continue;
+        if (!selectedByGlobs(row.path, opts)) { notSelected++; continue; }
+        drifted.push(row.slug); classes.set(row.slug, row.class ?? 'error');
+      }
       cursor = page.next ?? undefined;
     } while (cursor && drifted.length < ALL_DRIFTED_LIMIT);
     const counts = new Map<DriftClass, number>();
@@ -158,7 +182,7 @@ async function selectSlugs(engine: BrainEngine, sourceId: string, opts: RepairPl
         `Preview one class at a time: ${previewCommand(sourceId, { ...opts, driftClass: [...counts.keys()][0] })}, and so on for each class; or name pages with --slug.`,
         { fix: readFix('Lists the drifted pages with their drift class, read-only.', { argv: ['gbrain', 'sources', 'reconcile', sourceId, '--brain', 'host', '--audit', '--conflicts', '--json'] }) });
     }
-    return { slugs: drifted.filter(slug => !opts.driftClass || classes.get(slug) === opts.driftClass), classes };
+    return { slugs: drifted.filter(slug => !opts.driftClass || classes.get(slug) === opts.driftClass), classes, notSelected };
   }
   const slugs = new Set(opts.slugs ?? []);
   if (opts.requests?.length) {
@@ -171,12 +195,12 @@ async function selectSlugs(engine: BrainEngine, sourceId: string, opts: RepairPl
       { fix: readFix('Lists the conflict receipts of this source grouped by slug, read-only.', { argv: ['gbrain', 'sources', 'reconcile', sourceId, '--brain', 'host', '--audit', '--conflicts', '--json'] }) });
     for (const row of rows) slugs.add(row.slug);
   }
-  return { slugs: [...slugs].sort(), classes };
+  return { slugs: [...slugs].sort(), classes, notSelected: 0 };
 }
 
 function validateOptions(scope: RepairScope, opts: RepairPlanOptions | undefined): asserts opts is RepairPlanOptions & { prefer: DriftSide } {
   if (opts?.remote !== false) throw trustedCliRequired('gbrain repair file-drift runs only for the trusted local CLI on the brain host.');
-  const usage = 'gbrain repair file-drift --source <id> (--slug <slug>... | --request <id>... | --all-drifted [--class <name>]) --prefer file|database';
+  const usage = 'gbrain repair file-drift --source <id> (--slug <slug>... | --request <id>... | --all-drifted [--class <name>]) [--only <glob>]... [--skip <glob>]... --prefer file|database';
   if (scope.source_ids.length !== 1) throw opError('invalid_params', 'gbrain repair file-drift needs exactly one --source.', `Name the source: ${usage}`);
   if (opts.prefer !== 'file' && opts.prefer !== 'database') throw opError('invalid_params', 'gbrain repair file-drift needs --prefer file or --prefer database.',
     `Choose the side whose content wins (protected metadata, tags union, protected takes and private facts are kept either way): ${usage}`);
@@ -187,6 +211,12 @@ function validateOptions(scope: RepairScope, opts: RepairPlanOptions | undefined
     `Pass one of ${DRIFT_CLASSES.join(', ')}; the conflict audit lists each drifted page's class.`);
   for (const slug of opts.slugs ?? []) {
     try { validateSlug(slug); } catch { throw opError('invalid_params', `Invalid page slug '${slug}'.`, 'Pass each page by its exact stored slug.'); }
+  }
+  for (const glob of [...(opts.only ?? []), ...(opts.skip ?? [])]) {
+    try { validateSlug(glob); } catch {
+      throw opError('invalid_params', `Invalid file path glob '${glob}'.`,
+        `--only and --skip take a canonical file path relative to the source, without a leading / or .. segment: an exact path, or (file-drift only) a glob where * matches within one path segment and ** across segments (e.g. --only concepts/agi.md or --only 'concepts/**'). ${usage}`);
+    }
   }
   if (opts.requests?.some(id => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
     throw opError('invalid_params', '--request takes a conflict receipt request UUID.', 'Pass the request id the conflict audit lists (last_conflict_request_id).');
@@ -223,6 +253,28 @@ async function survey(engine: BrainEngine, scope: RepairScope): Promise<RepairPl
     next_actions: next.length ? [...next.map(command => `Preview: ${command} (or --prefer database)`), 'Or preview single pages with --slug <slug>.'] : [] } };
 }
 
+/**
+ * One drifted page resolved with `prefer` winning, as a ready reconcile preview: the preferred side's decisions over
+ * reconcile's protections, the size check, and the exceptions. Throws `invalid_params` when a path still needs a
+ * human decision. The caller runs it as the trusted local CLI and has checked the page is still drifted.
+ */
+export async function prepareDriftPage(engine: BrainEngine, sourceId: string, slug: string, prefer: DriftSide, assessmentAt: string): Promise<ArtifactPage> {
+  const snapshotRow = await engine.readPageSnapshot(slug, { sourceId });
+  const adopt = !!snapshotRow && !snapshotRow.page.source_path && !snapshotRow.page.source_uri;
+  const state = await readReconcileState(engine, sourceId, slug, assessmentAt, { adoptSlugPath: adopt });
+  const database = reconcileCanonical(state.snapshot.page, state.snapshot.tags);
+  const file = reconcileCanonical(state.file, state.file.tags);
+  const decisions = preferSideDecisions(state.file, database, prefer);
+  const prepared = await prepareReconcileResult(engine, state, decisions);
+  if (prepared.conflicts.length || !prepared.ready) throw opError('invalid_params', 'Some paths still need a decision.',
+    `Preview ${slug} with gbrain sources reconcile ${sourceId} ${slug} --brain host --preview --out <file> and resolve it there.`);
+  const preview: ReconcileArtifact = { format_version: 1, preview_id: randomUUID(), preconditions: state.pins,
+    preimages: JSON.parse(stableJson({ file_base64: state.raw.toString('base64'), database: state.snapshot, stored_page: state.storedPage })),
+    decisions, conflicts: [], result: prepared.result, result_digest: digest(prepared.result), status: 'ready' };
+  await assertReconcileSize(engine, preview);
+  return { slug, prefer, adopt_slug_path: adopt, exceptions: driftExceptions(prepared.result, prefer === 'file' ? file : database), result: prepared.result, preview };
+}
+
 function item(page: ApprovedPage, index: number, hash: string, last: boolean, prefer: DriftSide): DriftItem {
   return { cursor: { phase: 0, id: index + 1 }, source_id: page.source_id, slug: page.slug, chars: 0, action: `prefer_${prefer}`, page, hash, last };
 }
@@ -235,7 +287,10 @@ export const fileDriftRepair: RepairHandler = {
     validateOptions(scope, opts);
     const sourceId = scope.source_ids[0]!;
     const command = previewCommand(sourceId, opts);
-    const selection = digest({ prefer: opts.prefer, slugs: opts.slugs ?? [], requests: opts.requests ?? [], all: opts.allDrifted === true, class: opts.driftClass ?? null });
+    const only = [...new Set(opts.only ?? [])].sort();
+    const skip = [...new Set(opts.skip ?? [])].sort();
+    const selection = digest({ prefer: opts.prefer, slugs: opts.slugs ?? [], requests: opts.requests ?? [], all: opts.allDrifted === true, class: opts.driftClass ?? null,
+      ...(only.length ? { only } : {}), ...(skip.length ? { skip } : {}) });
     if (opts.apply) {
       if (!opts.expect) throw new OperationError('invalid_params', 'gbrain repair file-drift --apply applies only the set a preview printed.',
         `Preview first: ${command} — then run the apply command it prints with --expect <preview-hash>.`, 'docs/guides/repair.md#explicit-only-repair-kinds');
@@ -244,39 +299,28 @@ export const fileDriftRepair: RepairHandler = {
       const items = approved.items.map((page, index) => item(page, index, opts.expect!, index === approved.items.length - 1, opts.prefer));
       return { items: items.filter(entry => afterCursor(entry.cursor, after)), preview_hash: opts.expect, residuals: {} };
     }
-    const { slugs, classes } = await selectSlugs(engine, sourceId, opts);
+    const { slugs, classes, notSelected } = await selectSlugs(engine, sourceId, opts);
     const assessmentAt = new Date().toISOString();
     const pages: ArtifactPage[] = [];
     const listing: NonNullable<RepairPlan['listing']> = [];
-    const residuals: Record<string, number> = {};
+    const residuals: Record<string, number> = notSelected ? { not_selected: notSelected } : {};
     const count = (key: string) => { residuals[key] = (residuals[key] ?? 0) + 1; };
     await asLocalCli(engine, async () => {
       for (const slug of slugs) {
         try {
           await authorizeReconcile(engine, sourceId, slug);
           const live = await liveFileDrift(engine, sourceId, slug);
+          if (!opts.allDrifted && !selectedByGlobs(live.path, opts)) { count('not_selected'); continue; }
           if (live.still_present !== true) {
             count(live.still_present === false ? 'no_drift' : `unknown_${live.reason}`);
             listing.push({ item: `${sourceId}:${slug}`, class: live.still_present === false ? 'no_drift' : 'unknown', detail: live.reason });
             continue;
           }
-          const snapshotRow = await engine.readPageSnapshot(slug, { sourceId });
-          const adopt = !!snapshotRow && !snapshotRow.page.source_path && !snapshotRow.page.source_uri;
-          const state = await readReconcileState(engine, sourceId, slug, assessmentAt, { adoptSlugPath: adopt });
-          const database = reconcileCanonical(state.snapshot.page, state.snapshot.tags);
-          const file = reconcileCanonical(state.file, state.file.tags);
-          const decisions = preferSideDecisions(state.file, database, opts.prefer);
-          const prepared = await prepareReconcileResult(engine, state, decisions);
-          if (prepared.conflicts.length || !prepared.ready) throw opError('invalid_params', 'Some paths still need a decision.',
-            `Preview ${slug} with gbrain sources reconcile ${sourceId} ${slug} --brain host --preview --out <file> and resolve it there.`);
-          const preview: ReconcileArtifact = { format_version: 1, preview_id: randomUUID(), preconditions: state.pins,
-            preimages: JSON.parse(stableJson({ file_base64: state.raw.toString('base64'), database: state.snapshot, stored_page: state.storedPage })),
-            decisions, conflicts: [], result: prepared.result, result_digest: digest(prepared.result), status: 'ready' };
-          await assertReconcileSize(engine, preview);
-          const exceptions = driftExceptions(prepared.result, opts.prefer === 'file' ? file : database);
-          pages.push({ slug, prefer: opts.prefer, ...(classes.has(slug) ? { class: classes.get(slug) } : {}), adopt_slug_path: adopt, exceptions, result: prepared.result, preview });
+          const page = await prepareDriftPage(engine, sourceId, slug, opts.prefer, assessmentAt);
+          if (classes.has(slug)) page.class = classes.get(slug);
+          pages.push(page);
           listing.push({ item: `${sourceId}:${slug}`, class: `prefer_${opts.prefer}`,
-            detail: `${exceptions.length ? `kept: ${[...new Set(exceptions.map(e => e.reason))].join(', ')}` : 'exactly the preferred side'}${adopt ? '; adopts the file at its slug path' : ''}` });
+            detail: `${page.exceptions.length ? `kept: ${[...new Set(page.exceptions.map(e => e.reason))].join(', ')}` : 'exactly the preferred side'}${page.adopt_slug_path ? '; adopts the file at its slug path' : ''}` });
         } catch (error) {
           if (!(error instanceof OperationError) || ['owner_unavailable', 'writer_registration_required'].includes(error.code)) throw error;
           count(`refused_${error.code}`);

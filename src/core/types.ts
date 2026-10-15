@@ -694,6 +694,9 @@ export interface Chunk {
    * image search arm.
    */
   modality?: 'text' | 'image';
+  /** v244: UTF-8 byte span in the chunk_source's projected text (see ChunkInput); null when unrecorded. */
+  projected_byte_start?: number | null;
+  projected_byte_end?: number | null;
   /**
    * True when the stored vector is NULL. Cheap boolean (no vector egress) so
    * non-embedding readers can tell "vector missing" apart from `embedded_at`,
@@ -813,6 +816,14 @@ export interface ChunkInput {
   parent_symbol_path?: string[];
   doc_comment?: string;
   symbol_name_qualified?: string;
+  /**
+   * v244: where a prose chunk sits in the projected text of its chunk_source
+   * (credentialSafeProjection(sanitizeRemoteBody(<fence-overlaid compiled_truth
+   * or timeline>))), as UTF-8 byte offsets, end exclusive. Absent for code,
+   * image and low-tier fence chunks. Windowed reads center on it.
+   */
+  projected_byte_start?: number;
+  projected_byte_end?: number;
 }
 
 // Search

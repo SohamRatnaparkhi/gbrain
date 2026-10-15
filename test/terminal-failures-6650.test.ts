@@ -302,6 +302,8 @@ for (const kind of testBackends()) describe(`the aggregate, doctor and the drill
     await seed({ slug: 'h4', state: 'failed', code: 'storage_error', message: 'Publication failed (P0001). Inspect owner diagnostics.' });
     await seed({ slug: 'h5', state: 'failed', code: 'storage_error', message: 'Publication failed (P0001 in x: unknown). Inspect owner diagnostics.', detail: { origin: 'database_trigger', raiser: 'x' } });
     await seed({ slug: 'h6', operation: 'submit_job', state: 'cancelled', code: 'cancelled', detail: knock, build: 'dev-build' });
+    await seed({ slug: 'h7', operation: 'submit_job', state: 'failed', code: 'fence_unrenderable', message: 'The adopted fence row does not render its legacy fact.', build: '0.60.217.0' });
+    await seed({ slug: 'h8', operation: 'submit_job', state: 'failed', code: 'fence_unrenderable', message: 'The adopted fence row does not render its legacy fact.', build: '0.60.218.0' });
     const all = Object.values(TERMINAL_HISTORICAL_SQL).map(sql => sql('b')).join(' OR ');
     const rows = await engine.executeRaw<{ slug: string; flag: boolean; state: string; error_code: string; error_message: string | null; error_detail: Record<string, unknown> | null; operation: string;
       compacted: boolean; build: string | null }>(`SELECT b.*, (${all}) AS flag FROM (SELECT r.slug, r.state, r.error_code, r.error_message, r.error_detail, r.operation, r.compacted,
@@ -310,7 +312,7 @@ for (const kind of testBackends()) describe(`the aggregate, doctor and the drill
         COALESCE(r.error_detail->'attempt'->>'consumer_version', r.admitter_version) AS build FROM persistence_requests r) b ORDER BY b.slug`);
     const ts = rows.map(row => [row.slug, classifyTerminal({ ...base, ...row, recovery: null, blocked_reason: null })!.historical]);
     expect(rows.map(row => [row.slug, row.flag])).toEqual(ts as never);
-    expect(ts).toEqual([['h1', true], ['h2', false], ['h3', true], ['h4', true], ['h5', false], ['h6', false]]);
+    expect(ts).toEqual([['h1', true], ['h2', false], ['h3', true], ['h4', true], ['h5', false], ['h6', false], ['h7', true], ['h8', false]]);
   });
 
   test('the extracted supersession rule is the one failed-writes applies', async () => {
@@ -320,6 +322,6 @@ for (const kind of testBackends()) describe(`the aggregate, doctor and the drill
     const [row] = await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM persistence_requests r JOIN persistence_requests c ON ${supersessionSql('r', 'c')} WHERE r.state='failed'`);
     expect(row!.n).toBe(1);
     expect(categorizeCheck('persistence_terminal_failures')).toBe('ops');
-    expect(WAVE_CHECKS.find(spec => spec.id === 'persistence_terminal_failures')).toMatchObject({ resolution: 'operator', registration: 'wave' });
+    expect(WAVE_CHECKS.find(spec => spec.id === 'persistence_terminal_failures')).toMatchObject({ resolution: 'operator', registration: 'doctor.ts' });
   });
 });

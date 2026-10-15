@@ -130,6 +130,20 @@ describe('put_pages', () => {
     }
   });
 
+  test('#6696 (A6): a batch past a cumulative cap refuses write_quota_exhausted with the host raise, not the outstanding wait', async () => {
+    const [{ used }] = await engine.executeRaw<{ used: number }>("SELECT COALESCE(max(lifetime_ids),0)::int AS used FROM persistence_counters WHERE key LIKE 'principal:%'");
+    await engine.setConfig(journalLimitKey('principalLifetimeIds'), String(used + 2));
+    try {
+      const refusal = await putPages.handler({ ...ctx(), admissionOrigin: 'interactive' }, { request_id: randomUUID(), wait_ms: 0,
+        pages: [page('notes/w1'), page('notes/w2'), page('notes/w3')] }).then(() => null, error => error);
+      expect(refusal).toMatchObject({ code: 'write_quota_exhausted', reason: 'lifetime_ids', fix: { actor: 'host_admin' } });
+      expect(refusal.suggestion).not.toContain('Wait for this connection');
+      expect(await engine.executeRaw("SELECT 1 FROM persistence_requests WHERE slug LIKE 'notes/w%'")).toEqual([]);
+    } finally {
+      await engine.unsetConfig(journalLimitKey('principalLifetimeIds'));
+    }
+  });
+
   test('every page needs put_page permission', async () => {
     const clientId = 'put-pages-batch-only';
     await engine.executeRaw(`INSERT INTO oauth_clients(client_id,client_name,scope,source_id,allowed_operations)

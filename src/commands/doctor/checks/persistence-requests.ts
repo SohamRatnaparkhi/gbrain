@@ -8,10 +8,10 @@ import { readPreparationPolicy } from '../../../core/persistence/switches.ts';
 import { resolvePrepare, resolveSessionTimeouts } from '../../../core/db.ts';
 import { agentFix, checkError, doctorVerify } from '../check-fix.ts';
 import { lostCallerWrites } from '../../../core/repair/failed-writes.ts';
+import { readCapacityForecast, readCapacityThresholds } from '../../../core/persistence/capacity-forecast.ts';
 
 const WINDOW_DAYS = 7;
 const SAMPLE = 10_000;
-const WARN_DAYS = 90;
 const HORIZON_DAYS = 3650;
 
 /**
@@ -46,8 +46,9 @@ export async function requestIndexesCheck(engine: BrainEngine): Promise<Check> {
  * over the last 7 days (sampled from the newest 10,000 admissions per scope,
  * one bounded index read each), lifetime request IDs against
  * `persistence.limits.*`, and the projected days until admission refuses.
- * Warns when a scope would exhaust its lifetime IDs within 90 days, with the
- * same `gbrain config set` value `persistence_capacity` prints.
+ * Warns when a scope would exhaust its lifetime IDs within
+ * `persistence.capacity.warn_days` (30), the threshold `persistence_capacity`
+ * uses, with the same `gbrain config set` value it prints.
  */
 export async function requestGrowthCheck(engine: BrainEngine): Promise<Check> {
   const docs = 'docs/guides/repair.md#request-growth';
@@ -58,6 +59,7 @@ export async function requestGrowthCheck(engine: BrainEngine): Promise<Check> {
     const counters = await engine.executeRaw<{ key: string; lifetime_ids: string }>(
       "SELECT key,lifetime_ids::text FROM persistence_counters WHERE key='brain' OR key LIKE 'principal:%' ORDER BY key");
     const limits = await readJournalLimits(engine);
+    const { warnDays } = await readCapacityThresholds(engine);
     const now = Date.now();
     const scopes = [];
     for (const counter of counters) {
@@ -78,11 +80,14 @@ export async function requestGrowthCheck(engine: BrainEngine): Promise<Check> {
         days_to_exhaustion: daysLeft === null ? null : Math.floor(daysLeft),
         exhaustion_date: daysLeft === null ? null : new Date(now + daysLeft * 86_400_000).toISOString().slice(0, 10) });
     }
-    const soon = scopes.filter(scope => scope.days_to_exhaustion !== null && scope.days_to_exhaustion < WARN_DAYS);
+    const soon = scopes.filter(scope => scope.days_to_exhaustion !== null && scope.days_to_exhaustion < warnDays);
     // Every principal shares one brain-wide key, so each key gets the largest value any scope needs.
     const needed = new Map<string, number>();
+    const forecast = soon.length ? await readCapacityForecast(engine, { limits }).catch(() => null) : null;
     for (const scope of soon) {
-      const value = await oneYearCapacity(engine, scope.scope, 'LifetimeIds', scope.lifetime_ids, scope.limit);
+      const predicted = forecast?.rows.find(row => row.scope === scope.scope && row.resource === 'lifetime_ids');
+      const value = predicted && predicted.per_day_7d > 0 ? predicted.recommended_limit
+        : await oneYearCapacity(engine, scope.scope, 'LifetimeIds', scope.lifetime_ids, scope.limit);
       needed.set(scope.config_key, Math.max(needed.get(scope.config_key) ?? 0, value));
     }
     const commands = [...needed].map(([key, value]) => `gbrain config set ${key} ${value}`);
@@ -90,7 +95,7 @@ export async function requestGrowthCheck(engine: BrainEngine): Promise<Check> {
       commands, verify: 'gbrain doctor --json (check persistence_request_growth)', docs };
     const rows = `${details.rows_exact ? '' : '~'}${details.rows} request row(s)`;
     if (!soon.length) return { name: 'persistence_request_growth', status: 'ok', details,
-      message: `${rows}; no scope exhausts its lifetime request IDs within ${WARN_DAYS} days at its last-${WINDOW_DAYS}-day rate.` };
+      message: `${rows}; no scope exhausts its lifetime request IDs within ${warnDays} days at its last-${WINDOW_DAYS}-day rate.` };
     return { name: 'persistence_request_growth', status: 'warn', details,
       message: `${rows}. ${soon.map(scope => `${scope.scope} admits ${scope.per_day}/day over the last ${scope.window_days} day(s) and reaches `
         + `${scope.config_key}=${scope.limit} (${scope.lifetime_ids} used) around ${scope.exhaustion_date}`).join('; ')}; admission refuses then. `

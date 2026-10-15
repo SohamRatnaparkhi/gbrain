@@ -142,7 +142,9 @@ work behind exits 0, so scripts should also check `results[].complete`.
 | `orphan-children` | `child_table_orphans` (also a `storage_corrupt` error) | Explicit-only. Deletes rows of page child tables (chunks, versions, tags, takes, raw data, timeline, links) whose page row no longer exists, and clears dangling `links.origin_page_id` and `files.page_id` references, each in one statement that rechecks the orphan condition. See [orphan children](#orphan-children). | `torn_pages`: page rows whose stored body cannot be read (torn TOAST). The preview names them; the repair never changes them. |
 | `planner-stats` | `planner_stats_stale` | Runs `ANALYZE` on the hot tables (pages, links, facts, takes, content_chunks, timeline_entries) whose planner statistics are stale, so search and graph reads stop planning as slow nested loops. PGLite also resets each table's pending row count; Postgres runs each `ANALYZE` with a 60 s statement timeout and a 2 s lock timeout. No journal admission, no user data changes, brain-wide. | none |
 | `contextual-mode` | `contextual_retrieval_coverage` (pages with no recorded mode) | Stamps the contextual retrieval mode on markdown pages imported without one (for example by a large `--no-embed` sync, or by a connector source on an older gbrain), exactly as a fresh import of the page would: the page, source and brain settings decide, and the per-chunk synopsis tier lands at the free title tier. It rebuilds projections only: no page write, no new page version and no request ID. A page whose stored vectors already match the stamped convention keeps them and queues no re-embedding; a page whose embedding input changes has only those vectors cleared and is re-embedded once, unless you pass `--no-embed`. | `unsealed_projection`: pages whose chunks lag their text; `gbrain embed --stale` or `safe-chunks` seals them first, and the next run stamps them. `embed_skip`: pages marked to skip embedding keep their stored vectors and are not stamped. |
-| `file-drift` | `maintenance_write_drift` | Explicit-only, preview-bound. Resolves pages whose canonical file differs from the database copy (`source_changed` / `file_database_drift`) through canonical reconciliation, preferring the file or the database copy within reconcile's protections. `--all-drifted` refuses mixed drift classes unless `--class` keeps one. See [file drift](#file-drift). | Protected metadata, the tag union and protected takes or private fact rows, listed per page as `exceptions`; pages changed after the preview (`changed_since_preview`). |
+| `file-drift` | `maintenance_write_drift` | Explicit-only, preview-bound. Resolves pages whose canonical file differs from the database copy (`source_changed` / `file_database_drift`) through canonical reconciliation, preferring the file or the database copy within reconcile's protections. `--all-drifted` refuses mixed drift classes unless `--class` keeps one; `--only`/`--skip` narrow by canonical file path glob. Opt-in `storage.keep_db` lets the owner host's resident consumer resolve drift under declared prefixes with the database copy. See [file drift](#file-drift). | Protected metadata, the tag union and protected takes or private fact rows, listed per page as `exceptions`; pages changed after the preview (`changed_since_preview`). |
+| `ghost-pages` | `ghost_pages` | Explicit-only, preview-bound, destructive consent. Soft-deletes live pages whose canonical file is missing on the owner host (ghost pages: every write refuses `canonical_file_missing` and no sync can import a file that is not there), through `delete_page` bound to the previewed owner, path and revision. `--apply --expect <hash> --yes`. See [ghost pages](#ghost-pages). | Declared db_only and never-filed derived pages (never listed); a page whose file came back before the apply (`file_restored`); pages changed after the preview (`changed_since_preview`). |
+| `receipt-compaction` | `persistence_capacity` (terminal bytes) | Explicit-only, preview-bound, destructive consent. Compacts terminal write receipts now instead of on the idle maintenance tick (#6696): the intent and error message are dropped, the outcome, error code and detail stay, and the unused reservation returns to the receipt-bytes counters. `--older-than <72h\|30d>` is floored at the configured retention unless `--force`; committed receipts only unless `--include-failures`. No admission, so it runs at a full cap. See [receipt compaction](#receipt-compaction). | `failures_kept`: failed, conflict and cancelled receipts left without `--include-failures`. Receipts of a run whose sync cursor is still open, and the newest sync receipt of each worktree, are never listed. |
 
 Timeline rows that an earlier version of a page produced and its current text
 no longer has are removals, not history, so `timeline` neither counts nor
@@ -241,6 +243,39 @@ warns when that date is less than 90 days away and prints the exact
 one more year, the same value `persistence_capacity` prints) and the check to
 re-run. Request IDs are permanent, so raising the limit is the intervention;
 nothing is evicted.
+
+<a id="receipt-compaction"></a>
+### Receipt compaction
+
+A brain whose receipt-bytes cap is close (doctor `persistence_capacity`, a
+`write_quota_exhausted` refusal with reason `terminal_bytes`) gets bytes back
+by compacting terminal receipts, which the resident consumer otherwise does
+on idle ticks once a receipt is older than `persistence.receipt_retention_days`
+(default 30). The repair runs the same per-receipt compaction on demand:
+
+```bash
+gbrain repair receipt-compaction --json                     # preview at the retention floor
+gbrain repair receipt-compaction --apply --expect <hash> --yes
+```
+
+- `--older-than <72h|30d>` sets the age; it may not be younger than the
+  configured retention unless `--force` (a younger receipt is how a caller
+  replays its request id in full). With retention 90 days, `--older-than 30d`
+  is refused and the refusal's fix is the preview at `90d`.
+- Committed receipts only, unless `--include-failures` (a failed receipt's
+  error message is what `gbrain write-request` shows; the code and detail stay).
+- A receipt of a run whose managed-sync cursor is still open, and the newest
+  committed sync receipt of each worktree, are never compacted: a resumed run
+  finds what it committed through them.
+- The preview binds an absolute cutoff and the newest request it saw; the apply
+  compacts only receipts of that set, each in its own short transaction
+  (counters locked first, `lock_timeout` 2 s, `statement_timeout` 15 s), and a
+  rerun of the same apply resumes after an interruption.
+- No admission and no receipt of its own, so it runs at a full cap and its
+  preview charges nothing. Brain-wide.
+
+Verify with `gbrain doctor --only persistence_capacity --json`: the
+`terminal_bytes` row drops by the bytes the apply freed.
 
 <a id="projection-drain"></a>
 ### Drain queued text projections
@@ -607,6 +642,62 @@ runs finish a full pass and report exact counts. While the next pass is in
 progress, a clean finished pass keeps the check `ok` until a newer timeline row
 is written. A run that has neither says `scan incomplete` and is a lower bound;
 `gbrain repair timeline` (preview) counts the whole brain in one go.
+
+<a id="ghost-pages"></a>
+### Ghost pages
+
+A ghost page is a live page whose canonical file is gone on the source's owner
+host: the file was moved or deleted outside gbrain and the deletion was never
+imported. Every write to it refuses `source_changed` with reason
+`canonical_file_missing` ([write refusals](write-refusals.md#canonical_file_missing)),
+and no sync can import a file that is not there, so retrying never clears it.
+Doctor `ghost_pages` counts them on the owner host (off it, or on a brain with
+no source checkout, the check is `ok` and not applicable); `gbrain pages ghosts
+--source <id> [--json]` lists them, read-only. A person decides, per page,
+which is right:
+
+- **Keep the page**: restore its file at the recorded canonical path on the
+  owner host (from Git or a backup; gbrain has no automated file restore),
+  then run `gbrain sync --source <id>`. Do not apply the repair.
+- **Remove the page**: preview, then apply after the user agrees.
+
+```bash
+gbrain repair ghost-pages --source default        # preview: each ghost, its recorded path and revision, and a hash
+gbrain repair ghost-pages --source default --apply --expect <hash> --yes
+```
+
+The preview writes nothing and prints the apply command with its hash. The
+apply needs the user's consent: without `--yes` a terminal asks, and a
+non-interactive run exits 3 (`ask_user`) with the consent payload and changes
+nothing. It soft-deletes exactly the previewed set through `delete_page`, bound
+to the canonical owner the preview ran under (host, worktree, owner epoch,
+source incarnation), each page's revision and its recorded path. Each page is
+checked again before its request, again in preparation, and its file at
+filesystem publication: a page whose file came back is kept (`file_restored`)
+and the result asks for a new preview; anything else that moved is
+`changed_since_preview`. Soft-deleted pages are purged for good by the
+autopilot purge phase 72 h after deletion; until then `gbrain restore <slug>
+--force` undoes one page (per slug; it writes the file back).
+
+It refuses:
+
+- off the source's canonical owner host, [`not_owner_host`](error-codes.md#not_owner_host);
+- when the checkout is missing or cannot be read reliably (a stat error, an
+  invalid gbrain.yml, an inconclusive page check),
+  [`ghost_storage_unknown`](error-codes.md#ghost_storage_unknown): a page is
+  never removed while its file may only be unreadable;
+- when the ghosts are more than half of a source's file-backed pages (on a
+  source with more than 20 of them),
+  [`ghost_mass_delete_refused`](error-codes.md#ghost_mass_delete_refused):
+  that almost always means the wrong or an unmounted checkout. Check it first;
+  if the removal is genuinely intended, ask the user and rerun the apply with
+  `GBRAIN_ALLOW_MASS_RECONCILE=1`.
+
+Declared `storage.db_only` pages, never-filed derive-phase pages, read-only
+mirror pages and pages written while their source was unbound publish to the
+database only and are never ghosts. Doctor `undeclared_db_only_pages` is a
+separate audit. A preview lists at most 1,000 ghosts; apply them, then preview
+again for the rest. Sync never removes ghost pages by itself.
 
 ### Stale atoms
 
@@ -976,6 +1067,7 @@ gbrain sources reconcile <id> --brain host --audit --conflicts   # read-only: re
 gbrain repair file-drift --source <id> --slug notes/a --prefer file        # preview one page
 gbrain repair file-drift --source <id> --all-drifted --class structurally_additive --prefer file
 gbrain repair file-drift --source <id> --all-drifted --class structurally_additive --prefer file --apply --expect <hash>
+gbrain repair file-drift --source <id> --all-drifted --only 'concepts/**' --prefer database   # preview every drifted page filed under concepts/
 ```
 
 Select pages with `--slug` (repeatable), `--request <id>` (a conflict receipt,
@@ -989,6 +1081,26 @@ union of both sides, and protected takes and private fact rows are kept as
 stored. Each page's preview lists `exceptions`, the places where the result
 differs from the preferred side and why (`protected_metadata`, `scan_state`,
 `tags_union`, `protected_takes_or_private_facts`).
+
+<a id="file-drift-globs"></a>`--only <path>` and `--skip <path>` (both repeatable) narrow any selection by
+the page's canonical file path, relative to the source. A value with no `*`
+is an exact path (`concepts/agi.md` selects that file only), as `--only` is for
+`frontmatter`, `fences` and `slug-conflicts`. Globs work on `file-drift` only:
+`*` matches within one path segment (`concepts/*` is every file directly under
+concepts/) and `**` matches across segments (`concepts/**` is everything under
+it, at any depth); the other kinds' `--only` takes exact paths. A page is
+selected when it matches some `--only` (or there is none) and no `--skip`.
+They match the file path, not the slug: `--only concepts/agi` selects
+nothing, `--only concepts/agi.md` selects the page. The pages they leave out
+are counted as `not_selected`, the mixed-class check and the 1,000-page bound
+run on the selected pages only, and the globs are bound into the preview hash
+and printed in the apply command, so running that exact command applies
+exactly the previewed pages (an apply under other globs refuses
+`preview_changed`). Quote a glob so the shell does not expand it.
+
+`--keep` belongs to `stuck-recovery`; file-drift refuses it and names the
+equivalent: `--prefer database` keeps the database copy, `--prefer file`
+keeps the file.
 
 The audit gives every drifted page one class: `structurally_additive`,
 `additive_with_suggestions`, `review_required`, `formatting_only` or `error`.
@@ -1006,6 +1118,32 @@ interrupted apply resumes and never writes a page twice. Each page reports
 `repaired`, `refused` (with the code) or `changed_since_preview` (the file or
 the page changed after the preview; preview again). A changed set refuses
 with `preview_changed`.
+
+<a id="file-drift-keep-db"></a>**Opt-in policy: keep the database copy under some prefixes.** For
+derived pages nobody edits by hand (concepts a cycle regenerates, for
+example) the database copy is the one to keep. Declare their prefixes in the
+source's `gbrain.yml`:
+
+```yaml
+storage:
+  keep_db:
+    - concepts/
+```
+
+On the canonical owner host the resident consumer of `gbrain serve`,
+`gbrain jobs work` or `gbrain autopilot` then reconciles each drifted page
+under those prefixes with the database copy winning, the same resolution
+`--prefer database` previews (reconcile's protections and backups apply). It
+submits one request per drifted page, at most 10 every 10 minutes, never
+twice for the same drift (the request id is derived from the page revision
+and file bytes), and stops before an admission that would cross 90% of the
+write-quota stop line. Prefixes match page slugs by whole path segments, like
+`db_tracked` and `db_only`. Nothing else reads the policy: another host, a
+short-lived command, and remote or caller writes keep refusing
+`source_changed` until the page is reconciled. Doctor `maintenance_write_drift`
+echoes each declared policy (`keep_db_policy`: prefixes, how many of the
+drifted pages it checked match, their receipt cost). Remove the block to turn
+the policy off.
 
 <a id="held-files"></a>
 ### Held files
@@ -1262,6 +1400,17 @@ approval ([`tail_exposure_approval`](write-refusals.md#tail_exposure_approval)).
 paragraph in `human_reason`; `fences.repair.llm false` turns the model tier
 off for the whole lane.
 
+**Slug conflicts agree with sync.** The `slug-conflicts` kind screens a held
+file, and the edit it would write, with the same screen managed sync froze
+the file with. A held file the screen now admits as it is (its `slug:` line
+names the file's own page, or it no longer conflicts) is listed as `import`
+and imported unchanged; the write clears only the hold observation the
+preview read, so a hold a newer sync wrote stays and the next run retries it.
+A file sync would hold whatever the lane writes (the page it is filed as
+carries a different slug than its path, or the line reaches the page only
+through an alias) is held [`slug_page_mismatch`](write-refusals.md#slug_page_mismatch)
+with both slugs and the exact hand edit.
+
 **Say to your agent:** *"Sync is holding a few files over their tables or
 slugs. Repair what gbrain can by itself and tell me what it wants me to
 decide."*
@@ -1294,7 +1443,7 @@ Each file gets one minimal line change in one class:
 | --- | --- | --- |
 | `safe` | Quote a value exactly as gbrain already reads it, strip NUL bytes, swap the outer quotes of a nested quoted value. Every parsed value stays the same. | Included. |
 | `interpretive` | Fold unquoted continuation lines into the value above, keep the later of a duplicated key, quote an unclosed `[`/`{` or a `#`-leading title, insert a missing closing `---`, remove a `slug:` line that names another page, re-import a page from its file, re-bind a held rename to the old page's current revision. | Only with `--include-ambiguous`. |
-| `needs_review` | No rule fixes it (mis-indented YAML, a protected key such as `visibility`, an import that would keep page data the file does not carry, a file over 5 MB). | Never written. The preview names the exact manual fix. |
+| `needs_review` | No rule fixes it (mis-indented YAML, a protected key such as `visibility`, an import that would keep page data the file does not carry, a file over the [page size limit](memory-boundaries.md#large-page-limits)). | Never written. The preview names the exact manual fix. |
 
 Two passes: when interpretive candidates exist, the safe preview's
 `next_actions` carry both the safe apply and the `--include-ambiguous` preview.

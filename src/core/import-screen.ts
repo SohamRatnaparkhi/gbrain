@@ -11,7 +11,7 @@
 import type { BrainEngine } from './engine.ts';
 import { loadConfig, loadConfigWithEngine } from './config.ts';
 import { loadConfigSnapshot } from './config-snapshot.ts';
-import { assessContentSanity, ContentSanityBlockError, type ContentSanityResult } from './content-sanity.ts';
+import { assessContentSanity, ContentSanityBlockError, DEFAULT_BYTES_BLOCK, type ContentSanityResult } from './content-sanity.ts';
 import { carryStoredQuarantineOverride, dropClassifierMarkers, hasCurrentQuarantineOverride, QUARANTINE_OVERRIDE_KEY, withQuarantineOverride } from './quarantine-override.ts';
 import { logContentSanityAssessment } from './audit/content-sanity-audit.ts';
 import { buildEmbedSkipMarker, EMBED_SKIP_KEY } from './embed-skip.ts';
@@ -35,8 +35,15 @@ import type { FenceMessageLocation } from './fence-repair/reasons.ts';
 import { fenceIssuesWire, fenceStep, type FenceIssueWire } from './fence-repair/tier1.ts';
 import type { FenceCtx, FenceFix, FencePage, FenceReason } from './fence-repair/types.ts';
 import { effectiveVisibility } from './search/private-visibility.ts';
+import { CODE_FILE_MAX_BYTES, PAGE_MAX_BYTES } from './page-size-policy.ts';
 
-export const MAX_FILE_SIZE = 5_000_000; // 5MB
+/** Largest Markdown page import admits: the Wave A ceiling (page-size-policy.ts). */
+export const MAX_FILE_SIZE = PAGE_MAX_BYTES;
+
+/** The size bound for a file at `path`: code keeps its own 5 MB bound (no content sanity, tree-sitter and edge extraction). */
+export function importSizeLimit(path: string): number {
+  return isCodeFilePath(path) ? CODE_FILE_MAX_BYTES : MAX_FILE_SIZE;
+}
 
 type ContentSanityConfig = NonNullable<NonNullable<ReturnType<typeof loadConfig>>['content_sanity']>;
 
@@ -83,6 +90,18 @@ export async function loadImportSanityConfig(engine: BrainEngine): Promise<Impor
     junkDisposition: cs.junk_disposition === 'reject' ? 'reject' : 'quarantine',
     writeGate: parseWriteGateConfig({ external_mode: externalMode, agent_mode: agentMode }),
   };
+}
+
+/**
+ * The bytes_block every size check applies: the write gate's resolution (DB
+ * config plane over file and env, #6526), capped at the page ceiling, and the
+ * ceiling itself when content sanity is disabled. Doctor's oversized_pages and
+ * the oversized-page backfill read it, so they agree with the gate.
+ */
+export async function effectiveBytesBlock(engine: BrainEngine): Promise<number> {
+  const sanity = await loadImportSanityConfig(engine);
+  const block = sanity.disabled ? PAGE_MAX_BYTES : (sanity.cs.bytes_block ?? DEFAULT_BYTES_BLOCK);
+  return Math.min(block, PAGE_MAX_BYTES);
 }
 
 export interface ContentDispositionContext {
@@ -234,7 +253,7 @@ export async function settleContentDisposition(engine: BrainEngine, parsed: Pars
       disposition: 'warn',
     });
     process.stderr.write(
-      `[gbrain] content-sanity warn: ${slug} (${sanityResult.bytes} bytes) — exceeds warn threshold, consider splitting\n`,
+      `[gbrain] content-sanity warn: ${slug} (${sanityResult.bytes} bytes) — exceeds warn threshold; stored and searchable, no action needed\n`,
     );
   }
   const gate = ctx.writeGate ? await applyTrustAllowRules(engine, assessPageForGate(parsed, ctx.writeGate, sanityCfg.writeGate ?? DEFAULT_WRITE_GATE_CONFIG),
@@ -396,7 +415,7 @@ export function screenNormalized(result: ImportScreenResult): boolean {
 export function screenImportContent(input: ImportScreenInput): ImportScreenResult {
   if (input.published?.()) return { status: 'published' };
   const codeFile = isCodeFilePath(input.path);
-  const size = contentSizeHold(input.byteLength ?? Buffer.byteLength(input.content, 'utf-8'), MAX_FILE_SIZE, codeFile);
+  const size = contentSizeHold(input.byteLength ?? Buffer.byteLength(input.content, 'utf-8'), codeFile ? CODE_FILE_MAX_BYTES : MAX_FILE_SIZE, codeFile);
   if (size) return { status: 'refused', refusal: size };
   if (codeFile) return { status: 'importable', parsed: null };
   const parsed = parseMarkdown(input.content, input.path, { validate: true, ...(input.activePack ? { activePack: input.activePack } : {}) });
@@ -427,6 +446,9 @@ export function screenImportContent(input: ImportScreenInput): ImportScreenResul
   }
   return { status: 'importable', parsed, ...(fences ? { fences } : {}) };
 }
+
+/** The next step of a page write over the page limit; a page under it never needs splitting. */
+export const PAGE_OVER_LIMIT_SUGGESTION = `The content is over the ${MAX_FILE_SIZE}-byte page limit, so it refuses on every retry. Every page under the limit is stored and searchable; only content over it must become several pages, each submitted with its own request_id.`;
 
 /**
  * The typed refusal a publication path throws. `legacy_error` keeps the wire
@@ -471,7 +493,7 @@ export function contentRefusalFromReceipt(code: string | null | undefined, messa
     : typed === 'content_rejected' ? 'The content-sanity gate rejects this content under the operator\'s junk_disposition=reject setting. Remove the matched junk, then submit with a new request_id.'
     : typed === 'purged_content' ? 'This content was purged by the owner and stays out of the brain. Do not resubmit it; write new content, or ask the user to clear the tombstone on the brain host (gbrain pages unpurge).'
     : typed === 'write_gate_rejected' ? 'The write gate refuses this external instruction-like content under the operator\'s write_gate.external_mode=reject setting, so it refuses on every retry. Tell the user; changing that setting is their decision.'
-    : 'The content is over the import size limit. Split it into smaller pages, then submit each with its own request_id.';
+    : PAGE_OVER_LIMIT_SUGGESTION;
   return { code: typed, ...(reason ? { reason } : {}), ...(key ? { key } : {}), ...(line !== undefined ? { line } : {}), suggestion };
 }
 

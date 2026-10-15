@@ -56,7 +56,7 @@ const OP_AREAS: Record<string, string> = {
   ontology_get: 'ontology', ontology_propose: 'ontology',
   ontology_dimensions: 'ontology', ontology_conflicts: 'ontology',
   // admin + operations
-  get_stats: 'admin', get_health: 'admin', run_doctor: 'admin', mute_notice: 'admin',
+  get_stats: 'admin', get_health: 'admin', run_doctor: 'admin', get_brain_health: 'admin', mute_notice: 'admin',
   get_status_snapshot: 'admin', run_onboard: 'admin', run_skillopt: 'admin',
   migrate_embeddings: 'admin', code_traversal_cache_clear: 'admin', get_write_attribution: 'admin',
   // identity

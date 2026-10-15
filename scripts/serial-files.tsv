@@ -107,13 +107,13 @@ test/decide/eval-flags.serial.test.ts	R1	R1: mutates process.env (GBRAIN_DECIDE_
 test/decide/evidence-copack-calibration.serial.test.ts	global-state	global-state: process-wide test seams __setDecideTransportForTests, __resetDecideStoreForTests; configureGateway changes the process-wide AI gateway; spyOn console.log, console.error
 test/decide/grounding-slot.serial.test.ts	global-state	global-state: process-wide test seams __setDecideTransportForTests, __resetDecideStoreForTests; configureGateway changes the process-wide AI gateway
 test/decide/judge-agreement-cli.serial.test.ts	R1	R1: mutates process.env (TYPESAFE_API_KEY, JEV_TYPESAFE_API_KEY)
+test/decide/newer-ref-hint-6497.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
 test/decide/quickstart-doc.serial.test.ts	R2	R2: mock.module(../../src/core/interaction.ts) replaces modules for every file in the process
 test/decide/retrieval-search.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
 test/decide/retrieval-think.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
 test/decide/review-duplicate-kinds.serial.test.ts	global-state	global-state: replaces the process-wide gateway decide transport (__setDecideTransportForTests) and gateway config
 test/decide/review-withdraw.serial.test.ts	global-state	global-state: replaces the process-wide gateway decide and embed transports (__setDecideTransportForTests, __setEmbedTransportForTests) and gateway config
 test/decide/search-slots.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
-test/decide/newer-ref-hint-6497.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
 test/decide/status-no-entity.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
 test/decide/triage-slot.serial.test.ts	global-state	global-state: process-wide test seams __setDecideTransportForTests, __setChatTransportForTests, __resetDecideStoreForTests; configureGateway changes the process-wide AI gateway
 test/decide/turn-context-s6.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
@@ -121,6 +121,7 @@ test/decide/writepath-datasets.serial.test.ts	global-state	global-state: process
 test/decide/writepath-phase.serial.test.ts	global-state	global-state: process-wide test seams __setChatTransportForTests, __setDecideTransportForTests, __resetDecideStoreForTests; configureGateway changes the process-wide AI gateway
 test/dispatch-response-meta.serial.test.ts	R2	R2: mock.module(../src/core/search/hybrid.ts) replaces modules for every file in the process
 test/dispatch-vector-incomplete.serial.test.ts	R2	R2: mock.module(../src/core/search/hybrid.ts) replaces modules for every file in the process
+test/divergence-safe-pull-5429.serial.test.ts	R1	R1: mutates process.env (GBRAIN_GIT_ALLOW_FILE_TRANSPORT) and spies on node:child_process
 test/doctor-autopilot-fanout-concurrency.serial.test.ts	R1	R1: mutates process.env (GBRAIN_AUDIT_DIR)
 test/doctor-backup-coverage.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_BACKUP_CHECK)
 test/doctor-connection-classified.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
@@ -144,13 +145,15 @@ test/embed-exit-code-3037.serial.test.ts	global-state	global-state: binds local 
 test/embed-input-type-wire.serial.test.ts	global-state	global-state: configureGateway changes the process-wide AI gateway
 test/embed-lock-skipped.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
 test/embed-max-usd-metered.serial.test.ts	global-state	global-state: configureGateway and __setEmbedTransportForTests change the process-wide AI gateway; replaces globalThis.fetch for the Voyage multimodal stub
-test/embed-overlength-drain.serial.test.ts	R2	R2: mock.module(src/core/embedding.ts) fake embedder; R1: mutates process.env (GBRAIN_MAX_CHUNK_TOKENS)
 test/embed-null-signature-warning-5527.serial.test.ts	global-state	global-state: process-wide test seams __setEmbedTransportForTests; configureGateway changes the process-wide AI gateway; spyOn console.error
+test/embed-overlength-drain.serial.test.ts	R2	R2: mock.module(src/core/embedding.ts) fake embedder; R1: mutates process.env (GBRAIN_MAX_CHUNK_TOKENS)
 test/embed-oversize-heal-drain.serial.test.ts	R2	R2: mock.module(../src/core/embedding.ts) replaces modules for every file in the process
+test/embed-page-cap.serial.test.ts	R2	R2: mock.module(../src/core/embedding.ts) replaces modules for every file in the process; also mutates process.env (GBRAIN_EMBED_CONCURRENCY)
 test/embed-partial-failure-3037.serial.test.ts	R2	R2: mock.module(../src/core/embedding.ts) replaces modules for every file in the process
 test/embed-quarantine.serial.test.ts	R2	R2: mock.module(../src/core/embedding.ts) replaces modules for every file in the process
 test/embed-stale-chunkless-pages.serial.test.ts	global-state	global-state: process-wide test seams __setEmbedTransportForTests; configureGateway changes the process-wide AI gateway
 test/embed-stale-dry-run-restamp-5289.serial.test.ts	global-state	global-state: process-wide test seams __setEmbedTransportForTests; configureGateway changes the process-wide AI gateway
+test/embed-stale-progress-5968.serial.test.ts	R1	R1: mutates process.env (GBRAIN_MAX_CHUNK_TOKENS)
 test/embed-stale-signature-pagination.serial.test.ts	R1	R1: mutates process.env (GBRAIN_EMBED_CONCURRENCY)
 test/embed-stale-unavailable-snapshot.serial.test.ts	global-state	global-state: process-wide test seams __setEmbedTransportForTests; configureGateway changes the process-wide AI gateway
 test/embed.serial.test.ts	R2	R2: mock.module(../src/core/embedding.ts) replaces modules for every file in the process
@@ -165,6 +168,7 @@ test/eval-brainbench-decide.serial.test.ts	R1	R1: mutates process.env (GBRAIN_DE
 test/eval-longmemeval-call-plan.serial.test.ts	R1	R1: mutates process.env (GBRAIN_CONTEXTUAL_SYNOPSIS_MODEL); process-wide gateway transports (__setChatTransportForTests, __setEmbedTransportForTests, __setRerankTransportForTests)
 test/eval-longmemeval-decide.serial.test.ts	R1	R1: mutates process.env (GBRAIN_DECIDE_SLOTS)
 test/eval-longmemeval-synopsis-tier.serial.test.ts	R1	R1: mutates process.env (GBRAIN_CONTEXTUAL_SYNOPSIS_MODEL)
+test/eval-longmemeval-via-operation.serial.test.ts	global-state	global-state: configureGateway changes the process-wide AI gateway; process-wide test seams __setEmbedTransportForTests, __setGenerateObjectTransportForTests, __setRerankTransportForTests; process.chdir to prove the summary names gbrain's own tree
 test/eval-retrieval-quality-decide.serial.test.ts	R1	R1: mutates process.env (GBRAIN_DECIDE_SLOTS)
 test/eval-run-all-outcome.serial.test.ts	R2	R2: mock.module(../src/commands/eval-brainbench.ts) replaces modules for every file in the process; spyOn process.stderr.write
 test/eval-takes-quality-runner.serial.test.ts	R2	R2: mock.module(../src/core/ai/gateway.ts) replaces modules for every file in the process
@@ -204,6 +208,7 @@ test/guarded-http-tls.serial.test.ts	global-state	global-state: binds local serv
 test/harness-delivery-recovery.serial.test.ts	global-state	global-state: R3: constructs PGLiteEngine outside beforeAll; R4: PGLiteEngine without an afterAll disconnect
 test/hook-backup-notice.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_BACKUP_CHECK)
 test/hook-command.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_HOOKS, GBRAIN_HOOK_LANE, GBRAIN_SOURCE (+3 more))
+test/hook-push-banner-superseded.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_BACKUP_CHECK)
 test/hook-session-start-serve-wait.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, CLAUDE_CONFIG_DIR, CODEX_HOME)
 test/hook-writeback-stop.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_SOURCE)
 test/hybrid-adaptive-dedup-cache-plane.serial.test.ts	R2	R2: mock.module(../src/core/embedding.ts) replaces modules for every file in the process
@@ -227,6 +232,7 @@ test/import-configured-root-guard.serial.test.ts	global-state	global-state: spyO
 test/import-connection-budget.serial.test.ts	R2	R2: mock.module(../src/core/postgres-engine.ts) replaces modules for every file in the process
 test/import-signature-stamp.serial.test.ts	global-state	global-state: process-wide test seams __setEmbedTransportForTests; configureGateway changes the process-wide AI gateway
 test/import-source-cr-mode.serial.test.ts	global-state	global-state: process-wide test seams __setEmbedTransportForTests; configureGateway changes the process-wide AI gateway
+test/init-search-mode.serial.test.ts	global-state	global-state: spawns real gbrain init/config CLI children against PGLite datastores in temp homes (180 s budget each)
 test/internal-breadth-callers.serial.test.ts	R2	R2: mock.module(../src/core/search/hybrid.ts) replaces modules for every file in the process
 test/jobs-child-readiness.serial.test.ts	global-state	global-state: spyOn console.error
 test/jobs-embed-background-dryrun.serial.test.ts	R2	R2: mock.module(../src/core/embedding.ts) replaces modules for every file in the process
@@ -282,6 +288,7 @@ test/openai-latest.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAI
 test/openclaw-compact-transcript-runtime.serial.test.ts	global-state	global-state: swaps the context engine's module-level transcript-runtime loader and SDK load state
 test/openclaw-context-engine-native.serial.test.ts	global-state	global-state: binds local servers/ports
 test/ops-run-onboard-scope-gate.serial.test.ts	R2	R2: mock.module(../src/core/onboard/checks.ts, ../src/core/remediation/index.ts, ../src/core/onboard/render.ts) replaces modules for every file in the process
+test/oversized-backfill.serial.test.ts	global-state	global-state: installs the process-global embedding transport seam (__setEmbedTransportForTests) and gateway config (configureGateway); swaps GBRAIN_HOME through withEnv
 test/page-summary-length.serial.test.ts	R1	R1: mutates process.env (GBRAIN_AUDIT_DIR)
 test/pending-write-exit.serial.test.ts	global-state	global-state: binds local servers/ports
 test/persistence-drain-latency.serial.test.ts	global-state	global-state: configureGateway changes the process-wide AI gateway; patches process stdout/stderr/console; times event-loop gaps against a bound, so a parallel neighbour would distort the measurement
@@ -334,8 +341,10 @@ test/search/crag-escalation-limit.serial.test.ts	R2	R2: mock.module(dynamic spec
 test/search/crag-think-source-scope.serial.test.ts	R2	R2: mock.module(../../src/core/search/hybrid.ts, ../../src/core/think/index.ts) replaces modules for every file in the process
 test/search/diverse-pool-hybrid.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME); stubs the process-wide gateway embed transport
 test/search/hybrid-reranker-integration.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_AUDIT_DIR)
+test/search/mode-receipt.serial.test.ts	global-state	global-state: configureGateway changes the process-wide AI gateway; process-wide test seams __setEmbedTransportForTests, __setRerankTransportForTests, __setChatTransportForTests, __setGenerateTextTransportForTests, __setGenerateObjectTransportForTests; R3: constructs PGLiteEngine outside beforeAll
 test/search/operation-expansion-contract.serial.test.ts	global-state	global-state: spyOn hybrid.hybridSearchCached, console.log
 test/search/output-redaction.serial.test.ts	R2	R2: mock.module(../../src/core/eval-capture.ts, ../../src/core/search/hybrid.ts, ../../src/core/ai/gateway.ts, ../../src/core/think/index.ts) replaces modules for every file in the process
+test/search/query-expand-capture-replay.serial.test.ts	global-state	global-state: spyOn replaces the hybridSearch module export process-wide
 test/search/relational-rerank-pin-hybrid.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
 test/seed-pglite.serial.test.ts	global-state	global-state: R3: constructs PGLiteEngine outside beforeAll; R4: PGLiteEngine without an afterAll disconnect
 test/self-upgrade-checkonly.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
@@ -361,14 +370,17 @@ test/skillopt/models-four-paths.serial.test.ts	R2	R2: mock.module(../../src/core
 test/skillopt/models-plan.serial.test.ts	global-state	global-state: configureGateway changes the process-wide AI gateway; patches process stdout/stderr/console
 test/skillopt/run-skillopt-op.serial.test.ts	R2	R2: mock.module(../../src/core/skillopt/orchestrator.ts, ../../src/core/repo-root.ts) replaces modules for every file in the process
 test/sources-push-cli.serial.test.ts	R1	R1: mutates process.env (HOME, GBRAIN_HOME, GBRAIN_GIT_ALLOW_FILE_TRANSPORT)
+test/spawn-seam-batch1-4992.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GIT_DIR) and spies on node:child_process
 test/stdio-stderr-redirect.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
 test/subagent-put-page-rejection.serial.test.ts	global-state	global-state: process-wide test seams __setChatTransportForTests; configureGateway changes the process-wide AI gateway; spyOn putPage.handler
 test/sync-convergence.serial.test.ts	global-state	global-state: binds local servers/ports (two latency proxies) and spawns serve/sync/put processes against one shared brain; its oracle tests read the single chaos scenario that beforeAll ran, across it() boundaries
 test/sync-cost-gate.serial.test.ts	global-state	global-state: process-wide test seams __setEmbedTransportForTests; configureGateway changes the process-wide AI gateway; patches process stdout/stderr/console
 test/sync-default-write-guard.serial.test.ts	global-state	global-state: spyOn console.error, console.log, process.exit
+test/sync-delegated-options-6696.serial.test.ts	global-state	global-state: process-wide test seams __resetDelegatedSyncForTests and the embedding transport; binds local servers/ports; patches process stdout/stderr/console
 test/sync-delete-trailing-hyphen.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
 test/sync-failure-ledger.serial.test.ts	R1	R1: mutates process.env (HOME, GBRAIN_SYNC_AUTOSKIP_AFTER)
 test/sync-index-matches-tree.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
+test/sync-managed-implied-no-pull-6543.serial.test.ts	global-state	global-state: patches process stdout/stderr/console to keep the notice off stdout and traps process.exit for the --all path; R1: mutates process.env (GBRAIN_HOME, GBRAIN_SYNC_NO_DELEGATE)
 test/sync-pull-failed-anchor.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
 test/sync-rename-reconcile.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
 test/sync-resumable-import.serial.test.ts	R1	R1: mutates process.env (GBRAIN_SYNC_CHECKPOINT_EVERY, GBRAIN_MAX_CONNECTIONS)
@@ -399,12 +411,3 @@ test/write-path-no-egress.serial.test.ts	global-state	global-state: binds a loca
 test/write-path-zero-llm.serial.test.ts	R1	R1: mutates process.env (ANTHROPIC_API_KEY, OPENAI_API_KEY) so gated chat and embedding paths are live
 test/writeback-nudge.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
 test/writeback-review-fixes.serial.test.ts	global-state	global-state: process-wide test seams __resetCheckpointHarvestForTests; patches process stdout/stderr/console
-test/hook-push-banner-superseded.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_BACKUP_CHECK)
-test/spawn-seam-batch1-4992.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GIT_DIR) and spies on node:child_process
-test/divergence-safe-pull-5429.serial.test.ts	R1	R1: mutates process.env (GBRAIN_GIT_ALLOW_FILE_TRANSPORT) and spies on node:child_process
-test/embed-stale-progress-5968.serial.test.ts	R1	R1: mutates process.env (GBRAIN_MAX_CHUNK_TOKENS)
-test/eval-longmemeval-via-operation.serial.test.ts	global-state	global-state: configureGateway changes the process-wide AI gateway; process-wide test seams __setEmbedTransportForTests, __setGenerateObjectTransportForTests, __setRerankTransportForTests; process.chdir to prove the summary names gbrain's own tree
-test/init-search-mode.serial.test.ts	global-state	global-state: spawns real gbrain init/config CLI children against PGLite datastores in temp homes (180 s budget each)
-test/search/mode-receipt.serial.test.ts	global-state	global-state: configureGateway changes the process-wide AI gateway; process-wide test seams __setEmbedTransportForTests, __setRerankTransportForTests, __setChatTransportForTests, __setGenerateTextTransportForTests, __setGenerateObjectTransportForTests; R3: constructs PGLiteEngine outside beforeAll
-test/search/query-expand-capture-replay.serial.test.ts	global-state	global-state: spyOn replaces the hybridSearch module export process-wide
-test/sync-managed-implied-no-pull-6543.serial.test.ts	global-state	global-state: patches process stdout/stderr/console to keep the notice off stdout and traps process.exit for the --all path; R1: mutates process.env (GBRAIN_HOME, GBRAIN_SYNC_NO_DELEGATE)

@@ -813,6 +813,34 @@
         ],
         "flagOnScopes": []
       },
+      "getChunkPage#default": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "pool",
+          "tx"
+        ],
+        "flagOnScopes": [
+          "default"
+        ]
+      },
+      "getChunkPage#sourceIds+excludePrivate": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "pool",
+          "tx"
+        ],
+        "flagOnScopes": [
+          "src-a,src-b"
+        ]
+      },
       "getChunkWindows#default": {
         "flagOffLanes": [
           "pool"
@@ -1772,6 +1800,34 @@
           "src-a"
         ]
       },
+      "listEmbeddingStateRows#default": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "pool",
+          "tx"
+        ],
+        "flagOnScopes": [
+          "*"
+        ]
+      },
+      "listEmbeddingStateRows#sourceIds": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "pool",
+          "tx"
+        ],
+        "flagOnScopes": [
+          "src-a"
+        ]
+      },
       "listEnrichCandidates#default": {
         "flagOffLanes": [
           "pool"
@@ -2493,6 +2549,48 @@
         ],
         "flagOnScopes": [
           "default"
+        ]
+      },
+      "readEmbeddingStateCounts#full": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "pool",
+          "tx"
+        ],
+        "flagOnScopes": [
+          "*"
+        ]
+      },
+      "readEmbeddingStateCounts#full+sourceIds": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "pool",
+          "tx"
+        ],
+        "flagOnScopes": [
+          "src-a"
+        ]
+      },
+      "readEmbeddingStateCounts#ops": {
+        "flagOffLanes": [
+          "pool"
+        ],
+        "flagOffOpensTransaction": false,
+        "flagOn": "scoped",
+        "flagOnLanes": [
+          "pool",
+          "tx"
+        ],
+        "flagOnScopes": [
+          "*"
         ]
       },
       "readPageSnapshot#default": {
@@ -3447,7 +3545,7 @@
       }
     },
     "static": {
-      "callSites": 29,
+      "callSites": 32,
       "directMethods": {
         "_searchKeywordCJK": 1,
         "countChunklessPagesWithContent": 1,
@@ -3459,17 +3557,20 @@
         "findDuplicatePages": 1,
         "getAllSlugs": 1,
         "getBacklinks": 1,
+        "getChunkPage": 1,
         "getChunkWindows": 1,
         "getChunks": 1,
         "getLinks": 1,
         "listChunklessPagesWithContent": 1,
         "listCorpusSample": 1,
+        "listEmbeddingStateRows": 1,
         "listLinkSources": 1,
         "listPages": 1,
         "listPrefixSampledPages": 1,
         "listStaleChunks": 1,
         "listStaleFrontmatterKeyPages": 1,
         "listStalePagesForExtraction": 1,
+        "readEmbeddingStateCounts": 1,
         "readPageSnapshot": 1,
         "readPageSnapshotsBatch": 1,
         "runVectorAttempt": 1,
@@ -3538,6 +3639,7 @@
         "getCalibrationCurve": "none",
         "getCalleesOf": "none",
         "getCallersOf": "none",
+        "getChunkPage": "direct",
         "getChunkWindows": "direct",
         "getChunks": "direct",
         "getChunksWithEmbeddings": "none",
@@ -3584,6 +3686,7 @@
         "listChunklessPagesWithContent": "direct",
         "listConfigKeys": "none",
         "listCorpusSample": "direct",
+        "listEmbeddingStateRows": "direct",
         "listEnrichCandidates": "none",
         "listEvalCandidates": "none",
         "listEvalCaptureFailures": "none",
@@ -3616,6 +3719,7 @@
         "putDreamVerdict": "none",
         "putPage": "none",
         "putRawData": "none",
+        "readEmbeddingStateCounts": "direct",
         "readPageSnapshot": "direct",
         "readPageSnapshotsBatch": "direct",
         "reconnect": "none",

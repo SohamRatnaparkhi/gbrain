@@ -223,8 +223,10 @@ check('inherited cancellation and a released filesystem context never enter the 
 
 check('old inactive sync intents and managed bypass options remain refused', async engine => {
   const f = await fixture(engine);
-  for (const change of [{ noPull: false }, { includeGitignored: true }, { skipFailed: true }]) {
-    await expect(performManagedSync(engine, { ...f.opts, ...change })).rejects.toMatchObject({ code: 'writer_coordinator_required' });
+  await expect(performManagedSync(engine, { ...f.opts, noPull: false })).rejects.toMatchObject({ code: 'writer_coordinator_required' });
+  // #6696 C2: the managed bypass flags refuse by name, before anything runs.
+  for (const [change, flag] of [[{ includeGitignored: true }, '--include-gitignored'], [{ skipFailed: true }, '--skip-failed']] as const) {
+    await expect(performManagedSync(engine, { ...f.opts, ...change })).rejects.toMatchObject({ code: 'managed_sync_flag_refused', detail: flag });
   }
   await engine.transaction(async tx => {
     await tx.executeRaw("SELECT set_config('gbrain.topology_change','on',true)");

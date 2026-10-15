@@ -1,4 +1,5 @@
 /** Full PGLite state recovery for managed in-agent installations. Never starts workers. */
+import { trueUpRequests } from '../persistence/receipt-true-up.ts';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -272,6 +273,9 @@ export async function restorePgliteBackup(options: { archive: string; into: stri
       const jobs = await tx.executeRaw<{ id: number }>(`UPDATE minion_jobs SET status = 'cancelled', lock_token = NULL, lock_until = NULL, finished_at = NOW(), updated_at = NOW(), error_text = 'quarantined by backup restore; inspect and explicitly resubmit', data = data || jsonb_build_object('__restore_previous_status', status, '__restore_id', $1::text) WHERE status NOT IN ('completed', 'failed', 'dead', 'cancelled') RETURNING id`, [restoreId]);
       quarantined = jobs.length;
     });
+    // #6696 (A1): the restore failed every pending effect; their requests give back their unused reservations.
+    await trueUpRequests(engine, (await engine.executeRaw<{ request_id: string }>(
+      "SELECT DISTINCT request_id FROM persistence_effects WHERE error_code IN ('restore_recovery','restore_new_brain')")).map(row => row.request_id));
     await engine.executeRaw('CHECKPOINT');
     const restoredDatabase = engine.db;
     await engine.disconnect();

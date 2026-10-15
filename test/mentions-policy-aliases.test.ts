@@ -18,6 +18,7 @@ import {
 import { aliasRejection, captureName, declarationsIn, declaredNames, deriveEntityAliases, titleSubject } from '../src/core/mentions/aliases.ts';
 import { aliasDeclarations } from '../src/core/ops/search.ts';
 import { isShortCode, SHORT_CODE_STOPLIST } from '../src/core/mentions/short-codes.ts';
+import { cpuMs } from './helpers/cpu-time.ts';
 
 const none = { typeAdds: [], typeRemoves: [] };
 const pack = async (name: string) => (await loadResolvedPackByName(name)).manifest;
@@ -188,9 +189,7 @@ describe('declared-name grammar (alias conventions spec)', () => {
 
   test('parsing stays linear on adversarial lines', () => {
     const line = `aka ${'A '.repeat(5000)}` + `\n| ${'Nickname '.repeat(3000)}|` + `\nNickname: ${'"'.repeat(5000)}`;
-    const t0 = performance.now();
-    declaredNames(line, 'Widget Co');
-    expect(performance.now() - t0).toBeLessThan(200);
+    expect(cpuMs(() => declaredNames(line, 'Widget Co'))).toBeLessThan(200);
   });
 });
 

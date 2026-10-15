@@ -1,4 +1,5 @@
 import { searchAnswerFeedback } from '../feedback/record.ts';
+import { recordRecallOutcome } from '../funnel.ts';
 import type { RelationalPlanMeta } from '../search/relational-recall.ts';
 import type { Notice } from '../agent-output.ts';
 import { readHolders } from './context.ts';
@@ -120,6 +121,7 @@ function searchOutput(ctx: OperationContext, p: Record<string, unknown>, results
   const shown = ctx.remote !== false || p.fields !== undefined ? { rows } : {};
   // Stage timings are read last, after the returned rows are assembled (meta only, never content).
   const emit = (output: { meta: Record<string, unknown> }, returned: SearchResult[], context = returned) => {
+    recordRecallOutcome(returned);
     ctx.emitResponseMeta?.('retrieval', { ...output.meta, ...(meta.backend === 'hydradb' ? { hydradb: { mode: meta.hydradb_mode ?? 'fast', markdown: markdownForHydraRows(context, results, typeof p.token_budget === 'number') } } : {}), timings: timings.snapshot() });
     return returned;
   };

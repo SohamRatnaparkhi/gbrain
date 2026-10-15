@@ -32,6 +32,8 @@ import { loadCoreBlock } from '../core/core-memory.ts';
 import { opError } from '../core/ops/contract.ts';
 import { coreTrustIdentity } from '../core/context/openclaw-core.ts';
 import type { TurnContextResult } from '../core/context/turn-context.ts';
+import { attachBrief, briefEnabled, resetBriefLedger, sessionStartBrief, SESSION_BRIEF_CUTOFF_MS, withBriefDeadline } from '../core/context/proactive-brief.ts';
+import { proactiveEligibility } from '../core/eligibility/registry.ts';
 
 /** Tighter entity-card fan-out on the PUSH path (eng 4A): the server budget
  * can't absorb the pull path's 8-card ceiling on a cold cache. */
@@ -68,6 +70,7 @@ export function makeContextPackIpcHandler(
   defaultSource: string,
 ): ContextPackHandler {
   return async (req) => {
+    const startedAt = Date.now();
     const sessionId =
       typeof req.sessionId === 'string' && req.sessionId.trim() ? req.sessionId : null;
 
@@ -212,6 +215,17 @@ export function makeContextPackIpcHandler(
         standingEntities: entities.slice(0, PUSH_PACK_MAX_ENTITIES * 2),
         ...(result.degradedReason ? {} : { lastWakeAt: new Date().toISOString() }),
       });
+    }
+    // Wave 5 D5 "Before you start" (default off): SessionStart only, after the
+    // pack, inside what is left of a request-start cutoff. A compaction or
+    // /clear re-entry is a context reset, so the session's ledger starts over.
+    const isSessionStart = typeof req.trigger === 'string' && req.trigger.startsWith('session-start');
+    if (isSessionStart && await briefEnabled(engine)) {
+      if (req.trigger === 'session-start:compact' || req.trigger === 'session-start:clear') resetBriefLedger(sessionSource, sessionId ?? undefined);
+      const clock = { now: Date.now(), stopAt: startedAt + SESSION_BRIEF_CUTOFF_MS };
+      const brief = await withBriefDeadline(proactiveEligibility({ engine }, 'context_pack').then((eligibility) =>
+        sessionStartBrief(engine, { sourceId: sessionSource, sessionId: sessionId ?? undefined, eligibility, clock })), clock);
+      return attachBrief(result, brief);
     }
     return result;
   };

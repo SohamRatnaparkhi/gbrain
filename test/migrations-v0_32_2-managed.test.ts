@@ -206,7 +206,7 @@ for (const backend of testBackends()) {
       const file = readFileSync(join(root, `${LEGACY_FILE_SLUG}.md`), 'utf8');
       const phase = await __testing.phaseBFenceFacts(engine, OPTS);
       expect(phase).toMatchObject({ name: 'fence_facts', status: 'failed' });
-      expect(phase.detail).toStartWith('queue_capacity: Write capacity exhausted: principal permanent request IDs (0 used of 0).');
+      expect(phase.detail).toStartWith('write_quota_exhausted: Write capacity exhausted: principal permanent request IDs (0 used of 0).');
       expect(phase.detail).toContain('gbrain config set persistence.limits.principal_lifetime_ids ');
       expect(await factRows(engine, [...seed.legacyFactIds, ...seed.dbOnlyFactIds])).toEqual(before);
       expect(readFileSync(join(root, `${LEGACY_FILE_SLUG}.md`), 'utf8')).toBe(file);

@@ -5,6 +5,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { SyncOpts } from '../../commands/sync.ts';
 import { parseMarkdown } from '../markdown.ts';
 import { OperationError, opError } from '../ops/contract.ts';
+import { managedForbiddenFlag, managedSyncFlagRefusal } from './managed-sync-flags.ts';
 import type { Action } from '../agent-output.ts';
 import type { RegistryCode } from '../error-registry.ts';
 import { buildDetachedWorkingTreeManifest, computeSyncDelta } from '../sync-delta.ts';
@@ -23,7 +24,7 @@ import { assertDistinctSyncOrigins, legacySyncOrigin, sameSyncOrigin, selectOrig
 import { assertManagedSyncActive } from './sync-authority.ts';
 import { isReservedSkillBundlePath } from '../skill-reserved-paths.ts';
 import { holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds, readSyncImportProvenances } from './sync-holds.ts';
-import { readBlobContents, readTreeBlobs } from './sync-blobs.ts';
+import { readBlobContents, readTreeBlobs, SYNC_READ_BOUND } from './sync-blobs.ts';
 import { gitChildEnv } from '../git-env.ts';
 import { readSyncSlice, sliceEntries, syncCursorOptions, type SyncSliceCursor, type SyncSliceState } from './sync-slices.ts';
 
@@ -101,8 +102,8 @@ export function readSyncFile(root: string, path: string): Buffer | null {
     }
     if (!lstatSync(absolute).isFile()) throw syncTargetRefusal('source_changed', 'Sync target is not a regular file.',
       `${path} is not a regular file.`);
-    if (lstatSync(absolute).size > 10 * 1024 ** 2) throw opError('request_too_large', 'Sync file exceeds the bounded import size.',
-      `${path} is larger than the 10 MiB sync import bound, so nothing was imported from it. Shrink or split the file, or add it to the sync.exclude config, then sync its source again.`);
+    if (lstatSync(absolute).size > SYNC_READ_BOUND) throw opError('request_too_large', 'Sync file exceeds the bounded import size.',
+      `${path} is larger than the ${SYNC_READ_BOUND}-byte (24 MiB) page ceiling, so nothing was imported from it. Pages up to that size are chunked and searchable; above it, add the file to the sync.exclude config (or keep it outside the brain repo), then sync its source again. See docs/guides/memory-boundaries.md#large-pages.`);
     return readFileSync(absolute);
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
 }
@@ -162,8 +163,8 @@ export async function resolveManagedSyncContext(engine: BrainEngine, opts: SyncO
   const sourceId = opts.sourceId ?? 'default';
   if (!opts.noPull && !opts.dryRun) throw managedSyncRefusal(sourceId, 'Managed sync requires skipping the Git pull (CLI `--no-pull`, sync_brain `no_pull: true`); Git pull/rebase needs an explicit drained maintenance window.',
     `Sync without pulling to import the checkout as it is (CLI: gbrain sync --no-pull --source ${sourceId}; MCP: sync_brain with no_pull: true), or fast-forward and sync the checkout with gbrain sources refresh ${sourceId}.`);
-  if (opts.includeGitignored || opts.skipFailed) throw managedSyncRefusal(sourceId, 'Managed sync cannot bypass ignored-file or failed-receipt guards.',
-    `Run gbrain sync --no-pull --source ${sourceId} without --include-gitignored or --skip-failed; resolve failed files with --retry-failed after fixing them.`);
+  const forbidden = managedForbiddenFlag(opts);
+  if (forbidden) throw managedSyncFlagRefusal(forbidden, sourceId, ['--source', sourceId, '--no-pull']);
   const [source] = await engine.executeRaw<{ incarnation: string; archived: boolean; local_path: string | null; last_commit: string | null; config: Record<string, unknown> }>(
     'SELECT incarnation,archived,local_path,last_commit,config FROM sources WHERE id=$1', [sourceId]);
   const binding = await getWorktreeBinding(engine, sourceId);

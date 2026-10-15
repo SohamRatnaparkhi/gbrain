@@ -1,4 +1,5 @@
 import type { BrainEngine } from '../engine.ts';
+import { trueUpRequests } from './receipt-true-up.ts';
 import { loadConfigWithEngine, type GBrainConfig } from '../config.ts';
 import { MAX_RATE_LIMIT_RETRIES } from '../embed-retry.ts';
 import { EmbeddingDisabledError, readContentChunksColumnDim } from '../embedding-dim-check.ts';
@@ -142,7 +143,7 @@ export async function retryEmbeddingEffect(engine: BrainEngine, sourceId: string
   const config = await loadConfigWithEngine(engine, baseConfig);
   const configuredSignature = config?.embedding_model && config.embedding_dimensions
     ? `${config.embedding_model}:${config.embedding_dimensions}` : null;
-  return engine.transaction(async tx => {
+  const result = await engine.transaction(async tx => {
     await declarePersistenceProtocol(tx);
     const [selected] = await tx.executeRaw<PersistenceEffect>("SELECT * FROM persistence_effects WHERE request_id=$1::uuid AND kind='embedding'", [request.id]);
     if (!selected) throw opError('invalid_params', 'The embedding obligation is unavailable.',
@@ -223,4 +224,7 @@ export async function retryEmbeddingEffect(engine: BrainEngine, sourceId: string
     return { ...receipt, state: updated.state, action: complete ? 'reconciled' : 'retry_queued', pending_chunks: pending.length,
       next_action: complete ? 'The existing vectors satisfy this obligation; no provider work was scheduled.' : 'The resident owner may spend up to five attempts only when its selected file configuration and the database policy permit embedding, under existing provider and job budgets. Repeating this command does not renew that allowance.' };
   });
+  // #6696 (A1): a reconciled obligation settled the request's last effect; its reservation shrinks outside the approval transaction.
+  if (result.action === 'reconciled') await trueUpRequests(engine, [request.id]);
+  return result;
 }

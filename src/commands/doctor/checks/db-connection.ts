@@ -21,6 +21,7 @@ import type { Check } from '../../doctor.ts';
 import { classifyPgAccessError } from '../../../core/pg-access-classify.ts';
 import { dbRepairRecurrenceCheck } from './engine-fit.ts';
 import { STOP_DOCTOR, connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
+import { DoctorBudgetError, budgetUnknownCheck } from '../budget.ts';
 
 async function runPgliteDataDir(ctx: DoctorContext): Promise<Check[]> {
   const { args, engine, fastMode, progress } = ctx;
@@ -189,7 +190,10 @@ async function runOfflineConnection(ctx: DoctorContext): Promise<Check[]> {
     // whether a URL exists (env or config-file) — the caller simply
     // skipped the connection. When null, there really is no config
     // anywhere.
-    if (!fastMode && dbSource && connectError !== undefined) {
+    if (connectError instanceof DoctorBudgetError) {
+      // #6696 B1: the connect was still pending at the run's deadline: unknown, not an outage.
+      checks.push(budgetUnknownCheck('connection', connectError.elapsedMs, ctx.deadline?.budgetMs ?? connectError.elapsedMs));
+    } else if (!fastMode && dbSource && connectError !== undefined) {
       // 2c-bis: a REAL connect failure — synthesize the classified check so
       // `checks[name=="connection"]` exists in every failure shape.
       checks.push(classifiedConnectionCheck(connectError, dbSource));
@@ -268,9 +272,19 @@ async function runConnection(ctx: DoctorContext): Promise<Check[]> {
   // 3. Connection
   progress.heartbeat('connection');
   try {
-    const stats = await engine.getStats();
-    checks.push({ name: 'connection', status: 'ok', message: `Connected, ${stats.page_count} pages` });
+    // #6696 B1: the ops tier proves the round trip only; the page count is a full count the deadline does not afford.
+    if (ctx.tier === 'ops') {
+      await engine.executeRaw('SELECT 1 AS ok');
+      checks.push({ name: 'connection', status: 'ok', message: 'Connected (ops tier: page count not read).' });
+    } else {
+      const stats = await engine.getStats();
+      checks.push({ name: 'connection', status: 'ok', message: `Connected, ${stats.page_count} pages` });
+    }
   } catch (e: unknown) {
+    // A round trip the ops deadline ended (a saturated pool, a blocked server) is unknown, not a classified outage.
+    const deadlineAt = ctx.deadline?.deadlineAt;
+    if (e instanceof DoctorBudgetError) throw e;
+    if (ctx.tier === 'ops' && deadlineAt != null && Date.now() >= deadlineAt) throw new DoctorBudgetError(Date.now() - ctx.deadline!.startedAt);
     // db-availability loop (2c): classified + redacted, with the fix hint.
     checks.push(classifiedConnectionCheck(e));
     progress.finish();

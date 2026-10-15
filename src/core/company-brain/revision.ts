@@ -168,7 +168,7 @@ export async function readCommittedBlob(revision: RevisionIdentity, entry: Commi
       { fix: inspectAgain(revision.root, 'A fresh read-only inspection rebuilds the manifest from verified committed blobs.') });
   }
   if (entry.bytes === null || entry.bytes > limits.maxFileBytes) {
-    throw opError('request_too_large', 'Markdown exceeds the import file limit; split it into smaller files.',
+    throw opError('request_too_large', `Markdown exceeds the company-brain file limit (${limits.maxFileBytes} bytes, separate from the 24 MiB page limit); split it into smaller files.`,
       `${entry.path} is larger than the ${limits.maxFileBytes}-byte file limit. Split it into smaller files and commit them, or exclude it, then inspect again.`,
       { fix: inspectAgain(revision.root, 'Previews the plan without the oversized file; inspection is read-only.', [`--exclude=${entry.path}`]) });
   }

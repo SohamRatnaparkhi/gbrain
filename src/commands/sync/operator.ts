@@ -82,7 +82,13 @@ export async function runSyncStatus(engine: BrainEngine, args: string[]): Promis
   const sourceId = sourceOf(args);
   const status = await readSyncStatus(engine, sourceId);
   const ctx = cliRenderContext();
-  const rendered = { ...status, holds: status.holds.map(hold => ({ ...hold, fix: renderAction(hold.fix, ctx) })), next: status.next ? renderAction(status.next, ctx) : null };
+  // #6696 (A4): the capacity picture rides every status read (unthrottled), from the 60 s snapshot.
+  const { cachedCapacitySnapshot, capacityNotices } = await import('../../core/persistence/capacity-snapshot.ts');
+  const { renderNotice } = await import('../../core/agent-output.ts');
+  const snapshot = await cachedCapacitySnapshot(engine);
+  const notices = (await capacityNotices(engine, { throttle: false })).map(notice => renderNotice(notice, ctx));
+  const rendered = { ...status, holds: status.holds.map(hold => ({ ...hold, fix: renderAction(hold.fix, ctx) })), next: status.next ? renderAction(status.next, ctx) : null,
+    capacity: { status: snapshot.status, pause_pct: snapshot.pause_pct, low: snapshot.low, paused: snapshot.paused }, ...(notices.length ? { notices } : {}) };
   if (args.includes('--json')) return writeJsonDocument(JSON.stringify(rendered, null, 2));
   const c = status.cursor;
   console.log(`Source ${sourceId}: ${c ? c.done ? `last run finished at ${c.index}/${c.total} (pinned ${c.pinned_target?.slice(0, 8) ?? '?'})` : `cursor ${c.index}/${c.total} at pinned target ${c.pinned_target?.slice(0, 8) ?? '?'}`
@@ -100,6 +106,7 @@ export async function runSyncStatus(engine: BrainEngine, args: string[]): Promis
     for (const b of t.active_blockers) console.log(`    BLOCKING ${b.kind}: request ${b.request_id}${b.slug ? ` (${b.slug})` : ''} [${b.category}]`);
     if (t.active_blockers.length || t.unresolved.rows) console.log(`    drill down: ${t.drill_down.join(' ')}`);
   }
+  for (const notice of notices) console.log(`  [gbrain notice ${notice.code}] ${notice.why}`);
   if (rendered.next) console.log(`  Next: ${rendered.next.command ?? rendered.next.argv?.join(' ')}\n  Why: ${rendered.next.why}`);
   else console.log('  Next: nothing; the source is synced and holds nothing.');
 }

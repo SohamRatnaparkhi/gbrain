@@ -1,4 +1,5 @@
 import { submitPageMutation } from '../persistence/page-mutations.ts';
+import { recordFunnelEvent } from '../funnel.ts';
 import { MERGE_PRECONDITION_PARAMS, WRITE_REQUEST_PARAM } from '../persistence/params.ts';
 /**
  * Takes + think operation cluster — pure move from operations.ts (v0.46.x
@@ -500,7 +501,9 @@ const takes_supersede: Operation = {
     enforceClientSlugFence(ctx, slug, 'takes_supersede');
     validatePageSlug(slug); // defense-in-depth, matching put_page
     if (ctx.dryRun) return { dry_run: true, action: 'takes_supersede', slug, row_num: p.row_num };
-    return submitPageMutation(ctx, { operation: 'takes_supersede', params: p });
+    const out = await submitPageMutation(ctx, { operation: 'takes_supersede', params: p });
+    recordFunnelEvent('correction');
+    return out;
   },
 };
 

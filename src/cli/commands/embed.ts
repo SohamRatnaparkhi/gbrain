@@ -80,8 +80,10 @@ async function authorizeEmbed(engine: BrainEngine, args: string[]): Promise<{ au
 
 /** `gbrain embed --help` (answered without a brain) and the usage error. */
 const EMBED_USAGE = [
-  'Usage: gbrain embed [<slug>|--all|--stale|--slugs s1 s2 ...] [--dry-run] [--batch-size N] [--priority recent] [--catch-up] [--include-null-signature] [--source <id>] [--yes | --max-usd N] [--json] | --stale --images | --facts',
+  'Usage: gbrain embed [<slug>|--all|--stale|--slugs s1 s2 ...|--held] [--dry-run] [--batch-size N] [--priority recent] [--catch-up] [--include-null-signature] [--source <id>] [--yes | --max-usd N] [--json] | --stale --images | --facts',
   '  Embeds chunks without a vector (--stale; --catch-up keeps going until the backlog is empty) or re-embeds pages (--all, a slug, --slugs).',
+  '  A page over 1 MiB spends at most embed.max_usd_per_page (default $2) and embeds its newest chunks first; --held lists the pages a cap or a',
+  '  pending approval stopped, with the cost to finish, and --held --max-usd N (or --slugs <slug> --max-usd N) approves N more per page.',
   '  It calls the configured embedding provider, which bills per token: without a terminal it stops with exit 3 and the consent payload',
   '  unless --yes (cap: the estimate x1.5), --max-usd N, spend.posture=tokenmax or a per-run preapproval covers it. Pass those only after',
   '  the user agrees. --dry-run previews with no provider calls. Local providers that bill nothing (ollama, llama-server, lmstudio) need no approval.',

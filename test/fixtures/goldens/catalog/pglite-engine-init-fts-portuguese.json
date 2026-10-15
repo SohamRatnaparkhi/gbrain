@@ -205,6 +205,17 @@
       "page_aliases.page_aliases_origin_uniq": "u UNIQUE (source_id, alias_norm, slug, origin)",
       "page_aliases.page_aliases_pkey": "p PRIMARY KEY (id)",
       "page_aliases.page_aliases_source_fk": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
+      "page_embedding_budget.page_embedding_budget_cap_usd_check": "c CHECK (((cap_usd IS NULL) OR (cap_usd >= (0)::double precision)))",
+      "page_embedding_budget.page_embedding_budget_page_id_fkey": "f FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE",
+      "page_embedding_budget.page_embedding_budget_pkey": "p PRIMARY KEY (page_id)",
+      "page_embedding_budget.page_embedding_budget_reserved_usd_check": "c CHECK ((reserved_usd >= (0)::double precision))",
+      "page_embedding_budget.page_embedding_budget_spent_usd_check": "c CHECK ((spent_usd >= (0)::double precision))",
+      "page_embedding_budget.page_embedding_budget_state_check": "c CHECK ((state = ANY (ARRAY['open'::text, 'held'::text, 'capped'::text])))",
+      "page_embedding_budget.page_embedding_budget_unpriced_calls_check": "c CHECK ((unpriced_calls >= 0))",
+      "page_extraction_state.page_extraction_state_page_id_fkey": "f FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE",
+      "page_extraction_state.page_extraction_state_pipeline_check": "c CHECK ((pipeline = ANY (ARRAY['facts_backstop'::text, 'extract_atoms'::text, 'conversation_facts'::text])))",
+      "page_extraction_state.page_extraction_state_pkey": "p PRIMARY KEY (page_id, pipeline)",
+      "page_extraction_state.page_extraction_state_watermark_bytes_check": "c CHECK ((watermark_bytes >= 0))",
       "page_facts_reconcile.page_facts_reconcile_outcome_check": "c CHECK ((outcome = ANY (ARRAY['complete'::text, 'deferred'::text, 'invalid'::text, 'cancelled'::text])))",
       "page_facts_reconcile.page_facts_reconcile_page_id_fkey": "f FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE",
       "page_facts_reconcile.page_facts_reconcile_pkey": "p PRIMARY KEY (page_id)",
@@ -466,7 +477,7 @@
       "gbrain_stamp_version_attribution()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=1b28a0e5769198d86490dc20b2aee80b7e6595670428a63ac9c6825cd2a35b10",
       "gbrain_stamp_write_attribution()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=50e9b0e5bf37eeae6555dd16c8104cb0807be6c05a79e0c82237d45162c21dc2",
       "update_chunk_search_vector()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=3ffbe1c80104ca23fb2581cfdb67541b31769cc5af9dcd1c8b84f8c3844275f4",
-      "update_page_search_vector()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=e288cf3fefe11b32f9f006424f4a1b3b07b56d5fd5c3d1cd37ff1ce8658e1666"
+      "update_page_search_vector()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=991bcae3f032fbda5fabdb1276d77e51d324ce062c1785d966de6ecc92747335"
     },
     "grants": {
       "access_tokens": [
@@ -674,6 +685,12 @@
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
       "page_aliases": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "page_embedding_budget": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "page_extraction_state": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
       "page_facts_reconcile": [
@@ -1136,6 +1153,10 @@
       "page_aliases_origin_uniq": "CREATE UNIQUE INDEX page_aliases_origin_uniq ON public.page_aliases USING btree (source_id, alias_norm, slug, origin)",
       "page_aliases_pkey": "CREATE UNIQUE INDEX page_aliases_pkey ON public.page_aliases USING btree (id)",
       "page_aliases_slug_idx": "CREATE INDEX page_aliases_slug_idx ON public.page_aliases USING btree (source_id, slug)",
+      "page_embedding_budget_pkey": "CREATE UNIQUE INDEX page_embedding_budget_pkey ON public.page_embedding_budget USING btree (page_id)",
+      "page_embedding_budget_state_idx": "CREATE INDEX page_embedding_budget_state_idx ON public.page_embedding_budget USING btree (state) WHERE (state <> 'open'::text)",
+      "page_extraction_state_pkey": "CREATE UNIQUE INDEX page_extraction_state_pkey ON public.page_extraction_state USING btree (page_id, pipeline)",
+      "page_extraction_state_truncated_idx": "CREATE INDEX page_extraction_state_truncated_idx ON public.page_extraction_state USING btree (pipeline, page_id) WHERE (input_truncated IS NOT NULL)",
       "page_facts_reconcile_pkey": "CREATE UNIQUE INDEX page_facts_reconcile_pkey ON public.page_facts_reconcile USING btree (page_id)",
       "page_generation_clock_pkey": "CREATE UNIQUE INDEX page_generation_clock_pkey ON public.page_generation_clock USING btree (id)",
       "page_mention_state_pkey": "CREATE UNIQUE INDEX page_mention_state_pkey ON public.page_mention_state USING btree (page_id)",
@@ -1556,7 +1577,9 @@
           "23 symbol_name_qualified text/text NULL",
           "24 search_vector tsvector/tsvector NULL",
           "25 edges_backfilled_at timestamp with time zone/timestamptz NULL",
-          "26 embedding_pending_since timestamp with time zone/timestamptz NULL"
+          "26 embedding_pending_since timestamp with time zone/timestamptz NULL",
+          "27 projected_byte_start bigint/int8 NULL",
+          "28 projected_byte_end bigint/int8 NULL"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },
@@ -2519,6 +2542,33 @@
           "6 origin text/text NOT NULL DEFAULT 'frontmatter'::text",
           "7 case_sensitive boolean/bool NOT NULL DEFAULT false",
           "8 alias_text text/text NULL"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
+      "page_embedding_budget": {
+        "columns": [
+          "1 page_id integer/int4 NOT NULL",
+          "2 state text/text NOT NULL DEFAULT 'open'::text",
+          "3 reason text/text NULL",
+          "4 embedding_signature text/text NULL",
+          "5 spent_usd double precision/float8 NOT NULL DEFAULT 0",
+          "6 reserved_usd double precision/float8 NOT NULL DEFAULT 0",
+          "7 reserved_at timestamp with time zone/timestamptz NULL",
+          "8 unpriced_calls integer/int4 NOT NULL DEFAULT 0",
+          "9 cap_usd double precision/float8 NULL",
+          "10 updated_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
+      "page_extraction_state": {
+        "columns": [
+          "1 page_id integer/int4 NOT NULL",
+          "2 pipeline text/text NOT NULL",
+          "3 pipeline_version integer/int4 NOT NULL",
+          "4 watermark_bytes bigint/int8 NULL",
+          "5 watermark_sha256 text/text NULL",
+          "6 input_truncated jsonb/jsonb NULL",
+          "7 updated_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },

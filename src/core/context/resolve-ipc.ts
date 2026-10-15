@@ -310,6 +310,12 @@ export interface IpcServerOpts {
    */
   onTurnContextDelivered?: (result: TurnContextResult, req: TurnContextRequest) => void;
   /**
+   * context_pack sibling of onTurnContextDelivered (wave 5 D5): fired ONLY
+   * after an ok context_pack response with a non-empty block was written —
+   * the SessionStart brief's delivery seam (telemetry + repeat ledger).
+   */
+  onContextPackDelivered?: (result: TurnContextResult, req: ContextPackRequest) => void;
+  /**
    * The server's registered source [CX2-10]. turn_context requests naming a
    * DIFFERENT sourceId are rejected with 'source_mismatch'; the handler always
    * assembles against the bound source regardless.
@@ -833,6 +839,7 @@ export async function startResolveIpcServer(
         let resp: string;
         let delivered: { block: PointerBlock; req: ResolveRequest } | null = null;
         let deliveredTurnContext: { result: TurnContextResult; req: TurnContextRequest } | null = null;
+        let deliveredPack: { result: TurnContextResult; req: ContextPackRequest } | null = null;
         try {
           const parsed = JSON.parse(line) as IpcRequest;
           const kind = (parsed as { kind?: unknown }).kind ?? 'resolve';
@@ -861,9 +868,10 @@ export async function startResolveIpcServer(
               deliveredTurnContext = { result: tcResp.block, req };
             }
           } else if (kind === 'context_pack') {
-            resp = JSON.stringify(
-              await handleContextPack(parsed as ContextPackRequest, handlers, opts),
-            );
+            const req = parsed as ContextPackRequest;
+            const cpResp = await handleContextPack(req, handlers, opts);
+            resp = JSON.stringify(cpResp);
+            if (cpResp.ok && cpResp.block && cpResp.block.text) deliveredPack = { result: cpResp.block, req };
           } else if (kind === 'sync_start') {
             resp = JSON.stringify(
               await handleSyncKind(parsed as SyncStartRequest, handlers.sync_start, opts),
@@ -899,6 +907,9 @@ export async function startResolveIpcServer(
           }
           if (deliveredTurnContext && opts.onTurnContextDelivered) {
             try { opts.onTurnContextDelivered(deliveredTurnContext.result, deliveredTurnContext.req); } catch { /* telemetry only */ }
+          }
+          if (deliveredPack && opts.onContextPackDelivered) {
+            try { opts.onContextPackDelivered(deliveredPack.result, deliveredPack.req); } catch { /* telemetry only */ }
           }
         } catch { /* client gone — do NOT log undelivered pointers */ }
         conn.end();

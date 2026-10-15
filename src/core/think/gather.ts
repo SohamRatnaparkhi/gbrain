@@ -20,7 +20,8 @@ import type { TrustTier } from '../trust/tier.ts';
 import { EXTERNAL_DATA_RULE, needsDataEnvelope, trustAttributes } from '../eligibility/labels.ts';
 import { hybridSearch } from '../search/hybrid.ts';
 import { INTERNAL_BREADTH_SEARCH_OPTS } from '../search/internal-breadth.ts';
-import { sanitizeRemoteBody } from '../remote-body.ts';
+import { boundedProjectedPrefix } from '../page-window/document.ts';
+import { overlaidBoundedRows } from '../page-window/bounded-lead.ts';
 import type { Page, SearchResult } from '../types.ts';
 import { DEFAULT_PAGES_BUDGET, PAGES_BLOCK_EXCERPT_FLOOR_CHARS, type PagesBudget } from './pages-budget.ts';
 import { filterPagesToWindow, type TemporalWindow } from './temporal-window.ts';
@@ -135,7 +136,11 @@ export async function runGather(
   const pageScope = { ...sourceScope, excludePrivate: opts.excludePrivate, requireSafeChunks: opts.remote !== false, takesHoldersAllowList: opts.takesHoldersAllowList };
   // System One: gather searches run S3/S5 under call site `think` (remote spend counted as remote).
   const decide = { remote: opts.remote !== false, callSite: 'think', ...(opts.decideIntent ? { intent: opts.decideIntent } : {}) };
-  const visibleBody = (body: string) => opts.remote === false ? body : sanitizeRemoteBody(body);
+  // Large pages: a page row's text is a bounded, withdrawal-overlaid prefix
+  // (raw for the trusted local CLI, the sanitized projection otherwise), never the whole body.
+  const visibleLeads = async (rows: Page[]): Promise<string[]> =>
+    (await overlaidBoundedRows(engine, rows.map(p => ({ slug: p.slug, source_id: p.source_id ?? 'default', compiled_truth: p.compiled_truth ?? '' }))))
+      .map(r => opts.remote === false ? r.compiled_truth ?? '' : boundedProjectedPrefix(r.compiled_truth));
 
   // Sanitize the question for any path that includes it in an LLM prompt.
   // (Direct DB search is fine — those are parameterized queries.)
@@ -144,9 +149,9 @@ export async function runGather(
   const warnings: string[] = [];
   const window = opts.window;
 
-  const toSearchResult = (page: Page, rank: number): SearchResult => ({
+  const toSearchResult = (page: Page, rank: number, lead: string): SearchResult => ({
     slug: page.slug, page_id: page.id, title: page.title, type: page.type,
-    chunk_text: visibleBody(page.compiled_truth ?? ''), chunk_source: 'compiled_truth',
+    chunk_text: lead, chunk_source: 'compiled_truth',
     chunk_id: 0, chunk_index: 0, score: 1 / (51 + rank), stale: false,
     source_id: page.source_id ?? 'default',
     effective_date: page.effective_date instanceof Date ? page.effective_date.toISOString() : null,
@@ -172,7 +177,10 @@ export async function runGather(
       ...(window.startMs !== null ? { effective_after: new Date(window.startMs).toISOString() } : {}),
       ...(window.endMs !== null ? { effective_before: new Date(window.endMs).toISOString() } : {}),
       limit: 50, ...pageScope,
-    }).then(pages => pages.map(toSearchResult)).catch((e) => {
+    }).then(async pages => {
+      const leads = await visibleLeads(pages);
+      return pages.map((page, rank) => toSearchResult(page, rank, leads[rank]!));
+    }).catch((e) => {
       warnings.push('GATHER_WINDOW_FLOOR_FAILED');
       process.stderr.write(`[think.gather] window floor failed: ${(e as Error).message}\n`);
       return [] as SearchResult[];
@@ -273,7 +281,7 @@ export async function runGather(
       source_id: anchorPage.source_id ?? 'default',
       title: anchorPage.title,
       type: anchorPage.type,
-      chunk_text: visibleBody(anchorPage.compiled_truth),
+      chunk_text: (await visibleLeads([anchorPage]))[0]!,
       chunk_source: 'compiled_truth',
       chunk_id: 0,
       chunk_index: 0,

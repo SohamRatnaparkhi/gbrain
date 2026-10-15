@@ -127,7 +127,7 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     run: async (engine, scope) => (await import('./checks/persistence-requests.ts')).lostCallerWritesCheck(engine, scope.sourceIds),
   },
   {
-    id: 'persistence_terminal_failures', resolution: 'operator', registration: 'wave',
+    id: 'persistence_terminal_failures', resolution: 'operator', registration: 'doctor.ts',
     hostOnly: 'Request ids, roots and recovery records are brain-host persistence state outside any source scope.',
     count: d => Number(d.count ?? 0),
     impact: 'A write receipt that did not commit blocks work now (a recovery record or a checkpoint blocker), or an unresolved receipt is a gbrain-defect class',
@@ -207,6 +207,20 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     impact: 'A cumulative managed-write limit is at or above 80%',
     instruction: 'Raise the named journal limit with the `gbrain config set` command doctor prints, on the brain host.',
     run: async engine => (await import('./checks/persistence-capacity.ts')).checkPersistenceCapacity(engine),
+  },
+  {
+    id: 'persistence_compaction', resolution: 'operator', registration: 'doctor.ts',
+    count: d => (d.live_consumers ?? 0) > 0 ? 1 : 0,
+    impact: 'A resident consumer has not compacted write receipts within its staleness window, so receipt bytes are not coming back',
+    instruction: 'Check the consumer with `gbrain sources writer status --json`; preview an on-demand pass with `gbrain repair receipt-compaction --json` and apply it after the user agrees.',
+    run: async engine => (await import('./checks/persistence-compaction.ts')).checkPersistenceCompaction(engine),
+  },
+  {
+    id: 'persistence_counter_drift', resolution: 'operator', registration: 'doctor.ts',
+    count: d => (d.drift ?? []).length,
+    impact: 'Receipt-bytes counters differ from the receipts they account for',
+    instruction: 'Report the drift with `gbrain doctor --only persistence_counter_drift --json`; the check changes nothing.',
+    run: async engine => (await import('./checks/persistence-compaction.ts')).checkPersistenceCounterDrift(engine),
   },
   {
     id: 'parked_effects', resolution: 'operator', registration: 'doctor.ts',

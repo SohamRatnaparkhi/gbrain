@@ -398,7 +398,8 @@ for (const backend of testBackends()) {
       const [used] = await engine.executeRaw<{ n: number }>("SELECT COALESCE(max(lifetime_ids),0)::int AS n FROM persistence_counters WHERE key LIKE 'principal:%'");
       await engine.setConfig('persistence.limits.principal_lifetime_ids', String(used!.n));
       const lifetime = await extract(engine, calls).then(() => null, (e: Error & { code?: string }) => e);
-      expect(lifetime?.code).toBe('maintenance_backpressure');
+      // #6696 (A5): a cumulative cap is the host-only pause, not a retryable wait.
+      expect(lifetime?.code).toBe('write_capacity_backpressure');
       expect(calls.n).toBe(0);
       await engine.executeRaw("DELETE FROM config WHERE key='persistence.limits.principal_lifetime_ids'");
       // Outstanding: with one request pending, a limit of 2 (80% = 1) stops admitting the next page.
@@ -421,7 +422,7 @@ for (const backend of testBackends()) {
     }, { databaseUrl });
   }, 120_000);
 
-  test(`${backend}: admission stops at 80% of the writer's reserved receipt bytes, before any model call`, async () => {
+  test(`${backend}: admission stops at 80% of the writer's reserved receipt bytes, before any model call, with the host's raise or compaction`, async () => {
     await managedBrain(async brain => {
       const { engine } = brain;
       await putPage(brain, transcript());
@@ -430,15 +431,18 @@ for (const backend of testBackends()) {
       await engine.setConfig('persistence.limits.principal_terminal_bytes', String(Number(bytes) + 20_000));
       const calls = { n: 0 };
       const error = await extract(engine, calls).then(() => null, (e: Error & { code?: string; suggestion?: string }) => e);
-      expect(error?.code).toBe('maintenance_backpressure');
-      expect(error?.message).toContain('reserved receipt bytes');
+      expect(error?.code).toBe('write_capacity_backpressure');
+      expect(error).toMatchObject({ reason: 'terminal_bytes', fix: { actor: 'host_admin',
+        argv: ['gbrain', 'config', 'set', 'persistence.limits.principal_terminal_bytes', expect.stringMatching(/^\d+$/)] } });
+      expect(error?.message).toContain('terminal_bytes');
       expect(error?.suggestion).toContain('persistence.limits.principal_terminal_bytes');
+      expect(error?.suggestion).toContain('as retained receipts compact');
       expect(calls.n).toBe(0);
       expect(await extractorRows(engine)).toEqual([]);
     }, { databaseUrl });
   }, 120_000);
 
-  test(`${backend}: admission stops at 80% of the writer's permanent request ids, before any model call`, async () => {
+  test(`${backend}: admission stops at 80% of the writer's permanent request ids, before any model call, and asks for host action, never a wait`, async () => {
     await managedBrain(async brain => {
       const { engine } = brain;
       await putPage(brain, transcript());
@@ -447,9 +451,13 @@ for (const backend of testBackends()) {
       await engine.setConfig('persistence.limits.principal_lifetime_ids', String(used + 1)); // fits one admission, but past 80%
       const calls = { n: 0 };
       const error = await extract(engine, calls).then(() => null, (e: Error & { code?: string; suggestion?: string }) => e);
-      expect(error?.code).toBe('maintenance_backpressure');
-      expect(error?.message).toContain('permanent request ids');
-      expect(error?.suggestion).toContain('persistence.limits.principal_lifetime_ids');
+      // #6696 (A5, DX round 3): above the pause line, below the hard cap; ids never free, so the fix is the host's raise.
+      expect(error?.code).toBe('write_capacity_backpressure');
+      expect(error).toMatchObject({ reason: 'lifetime_ids', fix: { actor: 'host_admin',
+        argv: ['gbrain', 'config', 'set', 'persistence.limits.principal_lifetime_ids', expect.stringMatching(/^\d+$/)] } });
+      expect(error?.message).toContain('lifetime_ids');
+      expect(error?.suggestion).toContain('never freed');
+      expect(error?.suggestion).not.toMatch(/\b(wait|retry|settle)\b/i);
       expect(calls.n).toBe(0);
     }, { databaseUrl });
   }, 120_000);
@@ -470,7 +478,7 @@ for (const backend of testBackends()) {
       const calls = { n: 0 };
       const error = await runExtractConversationFactsCore(engine, { sourceId: 'default', sleepMs: 0, overrideDisabled: true,
         extractor: async () => { calls.n++; return []; } }).then(() => null, (e: Error & { code?: string; suggestion?: string }) => e);
-      expect(error?.code).toBe('maintenance_backpressure');
+      expect(error?.code).toBe('write_capacity_backpressure');
       expect(error?.message).toContain('3 planned');
       expect(error?.suggestion).toContain(`gbrain extract-conversation-facts --source-id default --limit ${room}`);
       expect(calls.n).toBe(0);

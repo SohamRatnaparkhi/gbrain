@@ -21,6 +21,7 @@ import type { SqlEngine } from '../persistence/model.ts';
 import { truncateUtf8 } from '../text-safe.ts';
 import { corpusTextForExtraction } from '../context/corpus-segments.ts';
 import { AtomPageStateError, type AtomPageInput } from './extract-atoms-page-state.ts';
+import { planExtraction, type ExtractionPlan, type StoredWatermark } from '../extraction-watermark.ts';
 
 export const DEFAULT_EXTRACT_MAX_INPUT_CHARS = 50_000;
 export const EXTRACT_MAX_INPUT_CHARS_KEY = 'cycle.extract_atoms.max_input_chars';
@@ -49,25 +50,40 @@ export type ExtractAtomsItem =
 export interface ExtractAtomsInput {
   /** Exactly the text the model receives; quote provenance verifies against it. */
   promptContent: string;
-  /** The text was longer than the cap: the model does not read its tail. */
+  /** The model does not read the whole item (a head, an appended tail or its newest window): partial disposition. */
   truncated: boolean;
   /** Characters of the text the cap applied to (post paste-strip for a transcript). */
   inputChars: number;
+  /** A page's watermark plan (extraction-watermark.ts), stored once the item's extraction succeeded. */
+  plan?: ExtractionPlan;
 }
 
 /**
  * Bind the cut once. Pastes are stripped from a transcript first (#5812), the
  * cap is applied UTF-8-safely (#4529/#4540: a bare slice can split a
  * surrogate pair), and `truncated` is measured on the text the cap applied to.
+ * Large pages A7: a page whose stored watermark still matches its body reads
+ * the text appended since (`watermark`); a tail read is partial input too, so
+ * the #6503 disposition holds (no completion stamp, nothing retired).
  */
-export function extractAtomsInput(item: ExtractAtomsItem, maxInputChars: number): ExtractAtomsInput {
-  const text = item.kind === 'transcript' ? corpusTextForExtraction(item.filePath, item.content) : item.content;
+export function extractAtomsInput(item: ExtractAtomsItem, maxInputChars: number, watermark: StoredWatermark | null = null): ExtractAtomsInput {
+  if (item.kind === 'page') {
+    const plan = planExtraction(item.content, watermark, { cap: maxInputChars, pipeline: 'extract_atoms', emptyTail: 'head' });
+    return { promptContent: plan.text, truncated: plan.mode !== 'full', inputChars: item.content.length, plan };
+  }
+  const text = corpusTextForExtraction(item.filePath, item.content);
   const promptContent = truncateUtf8(text, maxInputChars);
   return { promptContent, truncated: promptContent.length < text.length, inputChars: text.length };
 }
 
-/** The one stderr line per cut item; names the knob that raises the cap. */
-export function inputTruncatedLine(originLabel: string, input: ExtractAtomsInput, maxInputChars: number): string {
+/** The one stderr line per cut item; names the knob that raises the cap. Null for a complete appended-tail read. */
+export function inputTruncatedLine(originLabel: string, input: ExtractAtomsInput, maxInputChars: number): string | null {
+  const cut = input.plan?.truncated;
+  if (input.plan && !cut) return null;
+  if (cut?.kind === 'tail_window') {
+    return `[extract_atoms] ${originLabel}: ${cut.total_chars} chars were appended since the last extraction; the model read the newest ${cut.processed_chars}. `
+      + `Atoms are kept, the item is not marked complete, and doctor's extraction_input_truncated lists it: gbrain config set ${EXTRACT_MAX_INPUT_CHARS_KEY} <n>`;
+  }
   return `[extract_atoms] ${originLabel}: input truncated to ${maxInputChars} of ${input.inputChars} chars; the model did not read the tail. ` +
     `Atoms from the head are kept, the item is not marked complete and is skipped until the cap rises: gbrain config set ${EXTRACT_MAX_INPUT_CHARS_KEY} <n>`;
 }

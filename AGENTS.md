@@ -29,6 +29,8 @@ start here.
    only when the schema is at head; exit 1 with `migrations_pending` means the schema is still behind, and another
    `--yes` repeats the failure, so run `gbrain doctor --json` and fall back to the deterministic install:
    `git clone https://github.com/garrytan/gbrain.git ~/gbrain && cd ~/gbrain && bun install && bun link`.
+   `migrations_pending` with reason `wedged` is different: a migration failed three or more times in a row, so
+   relay its `fix` (ask the user) instead of reinstalling: fix the cause, then `gbrain apply-migrations --force-retry <version>`.
 
 Bun blocks gbrain's postinstall on `bun install -g` (`Blocked 1 postinstall`); a new install can skip it: the script only repeats the refusal every gbrain command prints on a Bun below the floor and runs `gbrain apply-migrations --yes --non-interactive`, which has nothing to migrate before a brain exists, and `gbrain setup` creates the brain and applies its setup migrations.
 

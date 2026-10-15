@@ -322,6 +322,19 @@ describe('maybeDelegateManagedSyncToServe (the Postgres ladder, client half)', (
     expect(n).toBe(0);
   }), 120_000);
 
+  test('#6696 (A5): the CLI sends origin interactive in the delegation payload', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+    const f = await fixture(1);
+    const origins: unknown[] = [];
+    captureStderr();
+    const result = await maybeDelegateManagedSyncToServe(engine, [], baseOpts(f.id), deps({ sock: await serveSocket({ sync_start: (req) => {
+      origins.push((req.options as { origin?: unknown }).origin);
+      return { ok: false, protocol: 2 as const, error: 'busy' };
+    } }) }));
+    releaseStderr();
+    expect(origins).toEqual(['interactive']);
+    expect(result).toMatchObject({ kind: 'own_consumer', reason: 'serve_refused' });
+  }), 120_000);
+
   test('a wrong IPC secret (unauthorized) falls back; the serve bound to another source (source_mismatch) falls back', async () => withEnv({ GBRAIN_HOME: home }, async () => {
     const f = await fixture(1);
     captureStderr();

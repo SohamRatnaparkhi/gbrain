@@ -18,12 +18,12 @@ import { pgliteScaleCheck } from './engine-fit.ts';
 import { checkParkedEffects } from './parked-effects.ts';
 import { checkManagedGuardSchemaDrift, checkPublicationRefusals } from './managed-guard.ts';
 import { checkWorktreeRefreshStuck } from './worktree-refresh.ts';
-import { checkPersistenceCapacity } from './persistence-capacity.ts';
+import { checkPersistenceCounterDrift } from './persistence-compaction.ts';
 import { checkPostgresCancellationDriver } from './postgres-cancellation.ts';
 import { checkProjectionReadiness } from './projection-readiness.ts';
 import type { Check } from '../../doctor.ts';
 import type { BrainEngine } from '../../../core/engine.ts';
-import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
+import { connectedEngine, type DoctorContext, type DoctorEntry, doctorHealth } from '../context.ts';
 import { embeddingsDisabled } from '../../../core/embedding-disabled.ts';
 import { quoteIdentifier, resolveActiveEmbeddingColumnFromEngine } from '../../../core/search/embedding-column.ts';
 import { checkError, infoCheck, keylessEnablementFix } from '../check-fix.ts';
@@ -45,9 +45,9 @@ async function runPgvector(ctx: DoctorContext): Promise<Check[]> {
   checks.push(await pagesUpsertArbiterCheck(engine));
   checks.push(await checkProjectionReadiness(engine));
 
-  // 4a-bis. Managed write capacity (#5470) and parked postcommit effects (#5612).
-  progress.heartbeat('persistence_capacity');
-  checks.push(await checkPersistenceCapacity(engine), await checkParkedEffects(engine), await checkWorktreeRefreshStuck(engine));
+  // 4a-bis. Parked postcommit effects (#5612) and receipt-bytes counter drift (#6696 A10); capacity and compaction are ops entries (checks/ops-sections.ts).
+  progress.heartbeat('parked_effects');
+  checks.push(await checkPersistenceCounterDrift(engine), await checkParkedEffects(engine), await checkWorktreeRefreshStuck(engine));
   // #5983/#5974: schema drift on guarded tables and writes the database refused.
   checks.push(await checkManagedGuardSchemaDrift(engine), await checkPublicationRefusals(engine));
 
@@ -74,7 +74,7 @@ export const pgvectorEntry: DoctorEntry = {
     'postgres_cancellation_driver',
     'pages_upsert_arbiter',
     'text_projection_readiness',
-    'persistence_capacity',
+    'persistence_counter_drift',
     'parked_effects',
     'worktree_refresh_stuck',
     'managed_guard_schema_drift',
@@ -395,7 +395,7 @@ async function runEmbeddings(ctx: DoctorContext): Promise<Check[]> {
       checks.push(infoCheck('embeddings', 'Not applicable: embeddings are disabled on this brain (keyword search keeps working).', 'disabled_by_choice', keylessEnablementFix()));
       return checks;
     }
-    const health = await engine.getHealth();
+    const health = await doctorHealth(ctx);
     const pct = (health.embed_coverage * 100).toFixed(0);
     // Coverage + missing now share one source (the stored vector over
     // eligible chunks), so the two numbers can no longer contradict each

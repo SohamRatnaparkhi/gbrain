@@ -1,6 +1,7 @@
 import { isAbsolute } from 'node:path';
 import type { SyncOpts } from '../../commands/sync.ts';
 import { opError } from '../ops/contract.ts';
+import { SYNC_PROCESSING_KEYS } from './sync-authority.ts';
 
 export const SYNC_BOOLEAN_FLAGS = {
   '--full':'full','--dry-run':'dryRun','--no-pull':'noPull','--no-embed':'noEmbed','--no-extract':'noExtract',
@@ -24,6 +25,8 @@ export function validateSyncWireParams(value: Record<string,unknown>): SyncWireP
     else if(stringFields.has(key)) { if(typeof item!=='string'||!item||item.length>32768||item.includes('\0'))throw invalid(); }
     else if(['exclude','includeHidden'].includes(key)) {
       if(!Array.isArray(item)||item.length>256||item.some(v=>typeof v!=='string'||!v||v.length>4096||v.includes('\0')))throw invalid();
+    } else if(key==='explicitProcessing') {
+      if(!Array.isArray(item)||new Set(item).size!==item.length||item.some(v=>!(SYNC_PROCESSING_KEYS as readonly unknown[]).includes(v)))throw invalid();
     } else throw invalid();
   }
   const options=value.options as SyncOpts;

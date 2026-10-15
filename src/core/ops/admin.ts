@@ -1,7 +1,7 @@
 import { PAGE_MUTATION_PARAMS } from '../persistence/params.ts';
 import { readPolicyOpts } from './context.ts';
 import { attributeVersions, canReadWriteAttribution } from './attribution.ts';
-import { invalidParam } from './op-fix.ts';
+import { GET_VERSIONS_DEFAULT_LIMIT, GET_VERSIONS_REMOTE_MAX_LIMIT, pagingLimit, reportVersionPage } from './read-paging.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
 /**
  * Admin operation cluster — pure move from operations.ts (v0.46.x tranche 2).
@@ -18,6 +18,7 @@ import { enforceClientSlugFence, sourceScopeOpts } from './context.ts';
 import { VERSION } from '../../version.ts';
 import { resolveActiveEmbeddingColumnFromEngine } from '../search/embedding-column.ts';
 import { memoizedHealth } from '../health-memo.ts';
+import { LARGE_PAGES_CAPABILITY } from './get-page-body.ts';
 
 // --- Admin ---
 
@@ -107,7 +108,7 @@ const get_brain_identity: Operation = {
   mutating: false,
   idempotent: true,
   outputRedaction: 'no_stored_text',
-  description: 'Brain identity + counters for thin-client banner — remote callers see counters confined to their source grant. Returns version, engine kind, and page/chunk counts. Read-scope.',
+  description: 'Brain identity + counters for thin-client banner — remote callers see counters confined to their source grant. Returns version, engine kind, page/chunk counts and capabilities (large_pages_v1: windowed get_page). Read-scope.',
   params: {},
   handler: async (ctx) => {
     // #4592: read-scope + unscoped counters made this op the quiet third
@@ -138,6 +139,7 @@ const get_brain_identity: Operation = {
       last_sync_iso: null as string | null,
       update_available,
       latest_version,
+      capabilities: [LARGE_PAGES_CAPABILITY],
     };
   },
   scope: 'read',
@@ -166,9 +168,13 @@ const run_doctor: Operation = {
   mutating: false,
   idempotent: true,
   outputRedaction: 'no_stored_text',
-  description: 'Run brain health checks and return a structured DoctorReport (thin-client doctor surface).',
-  params: {},
-  handler: async (ctx) => {
+  description: 'Run brain health checks and return a structured DoctorReport (thin-client doctor surface). tier "ops": only the operational sections under a 4 s deadline; only: just the named checks.',
+  params: {
+    tier: { type: 'string', enum: ['ops'], description: 'ops: capacity, write failures, embedding state, sync movement, compaction, serve build and schema pack, under one 4 s deadline. Omit for the focused remote report.' },
+    only: { type: 'array', items: { type: 'string' }, description: 'Run just these checks (doctor check names, for example persistence_capacity).' },
+  },
+  handler: async (ctx, p) => {
+    if (p.tier !== undefined || p.only !== undefined) return (await import('../../commands/doctor/remote-tier.ts')).runRemoteDoctorTier(ctx, p);
     const { doctorReportRemote } = await import('../../commands/doctor.ts');
     // Source isolation (cross-model P1): a source-bound caller's report must
     // not aggregate other sources' activity. Scope-aware checks (connection,
@@ -191,26 +197,31 @@ const get_versions: Operation = {
   mutating: false,
   idempotent: true,
   outputRedaction: { exempt: 'full page version snapshots by slug; a page read governed by visibility like get_page (CEO-17)' },
-  description: 'Page version history, newest snapshot first. Trusted local and admin callers also get written_by and archived_by (who wrote each snapshot and whose write archived it). `limit` returns only the newest N; `include_body: false` returns metadata only.',
+  description: `Page version history, newest snapshot first: metadata only (id, snapshot_at, title, type, tags, frontmatter) for the newest ${GET_VERSIONS_DEFAULT_LIMIT} versions by default. Pass include_body: true for each version's compiled_truth and timeline, and a larger limit (at most ${GET_VERSIONS_REMOTE_MAX_LIMIT} over MCP) for older versions. Trusted local and admin callers also get written_by and archived_by (who wrote each snapshot and whose write archived it). revert_version takes the id field.`,
   params: {
     slug: { type: 'string', required: true, description: 'Slug of the page whose version history to list.' },
-    limit: { type: 'number', description: 'Return only the newest N versions (a positive integer). Omit for the full history.' },
-    include_body: { type: 'boolean', description: 'false omits compiled_truth and timeline from every version (metadata only). Default true.' },
+    limit: { type: 'number', description: `Return only the newest N versions (a positive integer). Default ${GET_VERSIONS_DEFAULT_LIMIT}; MCP callers are capped at ${GET_VERSIONS_REMOTE_MAX_LIMIT}.` },
+    include_body: { type: 'boolean', description: 'true adds compiled_truth and timeline to every version. Default false (metadata only).' },
   },
   handler: async (ctx, p) => {
     // #5234: the bound and the body projection run in SQL, after the scope and
     // privacy predicates, so a bounded or metadata-only read never loads more
     // than it returns and never widens what the caller may see.
-    const limit = p.limit === undefined || p.limit === null ? undefined : p.limit;
-    if (limit !== undefined && !(typeof limit === 'number' && Number.isSafeInteger(limit) && limit >= 1)) {
-      throw invalidParam(ctx, 'get_versions', 'limit', 'get_versions: limit must be a positive integer.', { example: 5 });
-    }
-    const opts = { ...(await readPolicyOpts(ctx)), ...(limit !== undefined ? { limit } : {}) };
-    if (p.include_body === false) {
-      const metadata = await ctx.engine.getVersions(p.slug as string, { ...opts, includeBody: false });
+    // Large pages: metadata only and the newest 20 by default (100 per MCP
+    // call); one probe row past the limit says whether older versions exist.
+    const { limit, clampedFrom } = pagingLimit(ctx, 'get_versions', p.limit, GET_VERSIONS_DEFAULT_LIMIT, GET_VERSIONS_REMOTE_MAX_LIMIT);
+    const opts = { ...(await readPolicyOpts(ctx)), limit: limit + 1 };
+    const page = <T>(rows: T[]): T[] => {
+      reportVersionPage(ctx, p, { limit, clampedFrom, truncated: rows.length > limit });
+      return rows.slice(0, limit);
+    };
+    if (p.include_body !== true) {
+      // An adapter that ignores includeBody never leaks an unsanitized body through the metadata default.
+      const metadata = page(await ctx.engine.getVersions(p.slug as string, { ...opts, includeBody: false }))
+        .map(v => { const { compiled_truth: _b, timeline: _t, ...rest } = v as typeof v & { compiled_truth?: unknown; timeline?: unknown }; return rest; });
       return canReadWriteAttribution(ctx) ? attributeVersions(ctx.engine, metadata) : metadata;
     }
-    const plain = await ctx.engine.getVersions(p.slug as string, opts);
+    const plain = page(await ctx.engine.getVersions(p.slug as string, opts));
     const versions = canReadWriteAttribution(ctx) ? await attributeVersions(ctx.engine, plain) : plain;
     if (ctx.remote === false) return versions;
     return versions.map(v => ({ ...v, compiled_truth: sanitizeRemoteBody(v.compiled_truth),
@@ -286,8 +297,29 @@ const quarantine_list: Operation = {
   },
 };
 
+/**
+ * #6696 B2 (Garry decision d2b): banded brain health for any read-scope caller,
+ * the `verify.mcp` of every write-capacity fix. Capacity band with a days band,
+ * write-failure, ghost-page and unsearchable-chunk counts as bands, scoped to
+ * the sources the caller may read; no slugs, paths or exact counters.
+ */
+const get_brain_health: Operation = {
+  name: 'get_brain_health',
+  mutating: false,
+  idempotent: true,
+  outputRedaction: 'no_stored_text',
+  description: 'Brain health as bands for agents without admin scope: write capacity (ok, low or critical, with a days band) and counts of write failures, ghost pages and unsearchable chunks as bands, for the sources you can read. No slugs. Cached 60 s.',
+  params: {},
+  handler: async (ctx) => {
+    const scope = sourceScopeOpts(ctx);
+    const sourceIds = scope.sourceIds ?? (scope.sourceId ? [scope.sourceId] : undefined);
+    return (await import('../../commands/doctor/brain-health-bands.ts')).readBrainHealthBands(ctx.engine, { sourceIds });
+  },
+  scope: 'read',
+};
+
 // Ops in EXACTLY the canonical `operations` array order.
 export const adminOperations: Operation[] = [
-  get_stats, get_health, run_doctor, get_versions, revert_version,
+  get_stats, get_health, run_doctor, get_brain_health, get_versions, revert_version,
   get_brain_identity, quarantine_list,
 ];

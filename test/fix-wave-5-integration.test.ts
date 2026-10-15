@@ -196,7 +196,7 @@ for (const backend of testBackends()) {
         const previews = { 'google-file-modes': 'gbrain repair google-file-modes', 'stale-atoms': 'gbrain repair stale-atoms', 'extractor-facts': 'gbrain repair extractor-facts',
           'conversation-labels': 'gbrain repair conversation-labels', 'captured-facts': 'gbrain repair captured-facts', 'loop-facts': 'gbrain repair loop-facts', 'ontology-facts': 'gbrain repair ontology-facts', 'orphan-children': 'gbrain repair orphan-children', 'failed-writes': 'gbrain repair failed-writes',
           frontmatter: 'gbrain repair frontmatter', 'timeline-comments': 'gbrain repair timeline-comments', 'managed-sync-orphans': 'gbrain repair managed-sync-orphans', 'frontmatter-keys': 'gbrain repair frontmatter-keys', 'file-drift': 'gbrain repair file-drift',
-          'stuck-recovery': 'gbrain repair stuck-recovery' };
+          'stuck-recovery': 'gbrain repair stuck-recovery', 'ghost-pages': 'gbrain repair ghost-pages', 'receipt-compaction': 'gbrain repair receipt-compaction' };
 
         // The post-upgrade banner names both findings with the kind's read-only preview.
         const banner = await postUpgradeRecoveryBanner(engine, 'host');

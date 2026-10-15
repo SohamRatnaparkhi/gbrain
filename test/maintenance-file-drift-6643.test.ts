@@ -225,8 +225,26 @@ for (const backend of testBackends()) describe(`#6643 maintenance file drift (${
     expect(JSON.stringify(reader)).not.toContain(root);
     const fenced = await listConflicts.handler(remote({ boundSlugPrefixes: ['people/'] }), { source_id: sourceId }) as { conflicts: Array<{ slug: string }> };
     expect(fenced.conflicts.map(row => row.slug)).toEqual(['people/alice-example']);
-    const elsewhere = await listConflicts.handler(remote({ allowedSources: ['other-source'] }), { source_id: sourceId }) as { conflicts: unknown[]; totals: { slugs: number } };
-    expect(elsewhere).toMatchObject({ conflicts: [], totals: { slugs: 0 } });
+    // A source outside the grant is refused like every source-scoped read, the same whether it exists or not (no existence oracle).
+    for (const named of [sourceId, 'unregistered-example']) {
+      await expect(listConflicts.handler(remote({ allowedSources: ['other-source'] }), { source_id: named })).rejects.toMatchObject({ code: 'permission_denied' });
+    }
+    // The window is bounded by this source's own requests: writes in another source do not move it.
+    const before = await listConflicts.handler(remote({}), { source_id: sourceId }) as { window: Record<string, unknown>; next: string | null };
+    const other = `d6643-other-${randomUUID().slice(0, 8)}`;
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+    await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [other, join(root, '..', 'other')]);
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    await engine.executeRaw(`INSERT INTO persistence_requests(principal_kind,principal_id,request_id,operation,source_id,source_incarnation,slug,digest,intent,authority,intent_bytes,terminal_reservation,state)
+      SELECT 'local_cli','other',gen_random_uuid(),'put_page',$1,(SELECT incarnation FROM sources WHERE id=$1),'notes/n-'||g,'d','{}'::jsonb,'{}'::jsonb,1,16384,'committed'
+      FROM generate_series(1,5) g`, [other]);
+    const [{ top }] = await engine.executeRaw<{ top: string }>('SELECT max(sequence)::text AS top FROM persistence_requests');
+    const after = await listConflicts.handler(remote({}), { source_id: sourceId }) as { window: Record<string, unknown> };
+    expect(after.window).toEqual(before.window);
+    expect(after.window.through_sequence).not.toBe(top);
+    // A cursor naming a later sequence is clamped to the source's own newest request.
+    const forged = await listConflicts.handler(remote({}), { source_id: sourceId, cursor: `${top}:` }) as { window: Record<string, unknown> };
+    expect(forged.window.through_sequence).toBe(before.window.through_sequence);
   }), 240_000);
 
   test('--all-drifted refuses mixed drift classes unless --class keeps one', () => fixture(async ({ root, sourceId, ctx }) => {

@@ -16,6 +16,8 @@ import { currentVerifiedLocalWriter, localHostId, registerLocalWriter } from './
 import { getWorktreeBinding, managedPersistenceEnabled, type WorktreeBinding } from './ownership.ts';
 import { checkOwner, ownerUnavailableError } from './owner-refusal.ts';
 import { admitWrite, assertReplayIntent, getWriteRequest, intentDigest } from './journal.ts';
+import { assertRefusalBreakerClosed } from './refusal-breaker.ts';
+import { CANONICAL_FILE_MISSING } from './publication-failure.ts';
 import { assertPersistenceAccepting, waitForWrite, writeResponse } from './service.ts';
 import { preparePageMutation, prepareFileTarget } from './page-prepare.ts';
 import { prepareTakesMutation } from './takes-prepare.ts';
@@ -171,10 +173,15 @@ async function submitMaintenance(engine: BrainEngine, authority: MaintenanceAuth
   }
   // #6643 (B1): a canonical file that already differs from the database refuses at publication; refuse before a request
   // exists, so a producer that runs every cycle stops adding a conflict receipt per cycle. A replay above still returns its receipt.
-  if (file && authority.binding && snapshot && !snapshot.page.deleted_at
-    && (await liveFileDrift(engine, authority.writer.sourceId, slug, snapshot)).still_present === true) {
-    throw maintenanceDriftRefusal(authority.writer.sourceId, slug);
+  if (file && authority.binding && snapshot && !snapshot.page.deleted_at) {
+    const live = await liveFileDrift(engine, authority.writer.sourceId, slug, snapshot);
+    if (live.still_present === true) throw maintenanceDriftRefusal(authority.writer.sourceId, slug);
+    // #6696 (A12): the recorded canonical file is gone, so publication would refuse source_changed; refuse before a request exists.
+    if (live.reason === CANONICAL_FILE_MISSING && !PUBLISHES_WITHOUT_FILE.has(String(intent.kind))) throw maintenanceGhostRefusal(authority.writer.sourceId, slug);
   }
+  // #6696 (A12): the same write refused K times in the window is not admitted again until something it depends on changes.
+  await assertRefusalBreakerClosed(engine, { principal: authority.writer.principal, sourceId: authority.writer.sourceId, slug,
+    digest: intentDigest({ operation: 'submit_job', sourceId: authority.writer.sourceId, slug, callerIntent: intent }) });
   const row = await admitWrite(engine, { principal: authority.writer.principal, requestId, operation: 'submit_job',
     sourceId: authority.writer.sourceId, sourceIncarnation: authority.writer.sourceIncarnation, slug,
     pageId: snapshot?.page.id ?? null, authority: authority.writer, callerIntent: intent, intent,
@@ -189,6 +196,22 @@ export function maintenanceDriftRefusal(sourceId: string, slug: string): Operati
     + `List every such page with ${auditConflictsCommand(sourceId)}, then preview the resolution with gbrain repair file-drift --source ${sourceId} --slug ${slug} --prefer file (or --prefer database). Neither copy was changed.`,
     { detail: 'file_database_drift', fix: readFix(`Lists the pages of source ${sourceId} whose writes keep refusing source_changed, grouped by slug; read-only.`,
       { argv: ['gbrain', 'sources', 'reconcile', sourceId, '--brain', 'host', '--audit', '--conflicts', '--json'] }) });
+}
+
+/**
+ * #6696 (A12): maintenance kinds whose preparer passes `allowMissingFile` (chronicle, stale-atom retirement, ghost-page
+ * retirement, which exists to soft-delete pages whose canonical file is gone): a missing canonical file publishes, so it is no ghost.
+ */
+export const PUBLISHES_WITHOUT_FILE: ReadonlySet<string> = new Set(['managed_maintenance_chronicle_event', 'managed_maintenance_chronicle_retire', 'managed_maintenance_retire_stale_atoms',
+  'managed_maintenance_retire_ghost_page']);
+
+/** #6696 (A12): `source_changed` / `canonical_file_missing` before admission: the page's recorded file is gone; never a new request. */
+export function maintenanceGhostRefusal(sourceId: string, slug: string): OperationError {
+  return opError('source_changed', 'The canonical file was removed outside coordinated publication.',
+    `Maintenance submitted nothing for ${slug} in '${sourceId}': the page's canonical file is missing, so the write would only add another conflict receipt. `
+    + `Import the deletion with gbrain sync --source ${sourceId}, or restore the file and preview the page with gbrain sources reconcile ${sourceId} ${slug} --brain host --preview. Neither copy was changed.`,
+    { detail: CANONICAL_FILE_MISSING, docs: 'docs/guides/write-refusals.md#canonical_file_missing', fix: readFix(`Previews how page ${slug} and its missing canonical file reconcile; read-only.`,
+      { argv: ['gbrain', 'sources', 'reconcile', sourceId, slug, '--brain', 'host', '--preview', '--json'] }) });
 }
 
 /** #5523: a Life Chronicle timeline row projected onto the depth page in the same publication. */
@@ -524,6 +547,7 @@ async function prepareMaintenanceKind(engine: BrainEngine, row: WriteRequest, co
     return (await import('../chronicle/publish.ts')).prepareChronicleMutation(engine, row, config);
   }
   if (row.intent?.kind === 'managed_maintenance_retire_stale_atoms') return (await import('../repair/stale-atoms.ts')).prepareStaleAtomRetirement(engine, row, config);
+  if (row.intent?.kind === 'managed_maintenance_retire_ghost_page') return (await import('../repair/ghost-pages.ts')).prepareGhostPageRetirement(engine, row, config);
   if (row.intent?.kind !== 'managed_maintenance_consolidate') throw opError('invalid_params', 'Unsupported maintenance request.',
     `Request ${row.request_id} for ${row.slug} in ${row.source_id} carries a maintenance kind this gbrain version does not publish (likely queued by a newer release); nothing changed. Upgrade gbrain on the brain host, and read the receipt before submitting anything new.`,
     { fix: receiptFix(row) });

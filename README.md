@@ -101,7 +101,7 @@ before restarting services with this version.
 > reinstall; `gbrain doctor` detects it.
 > Schema not migrated ([#218](https://github.com/garrytan/gbrain/issues/218))?
 > Run `gbrain apply-migrations --yes --no-autopilot-install`; exit 1 means it's still
-> behind: run `gbrain doctor --json`, not `--yes` again.
+> behind: run `gbrain doctor --json`, not `--yes` (`wedged`: relay its fix).
 
 **Claude Code or Codex, fastest path:**
 

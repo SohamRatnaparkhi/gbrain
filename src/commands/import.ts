@@ -3,6 +3,7 @@ import { importFenceTally, type FencesNormalized } from '../core/fence-repair/re
 import { opError } from '../core/ops/contract.ts';
 import { hasSourceFilesystemLock, withSourceFilesystemLock, currentSourceFilesystemSignal } from '../core/minions/source-filesystem.ts';
 import { readdirSync, lstatSync, existsSync, mkdirSync } from 'fs';
+import { recordFunnelEvent } from '../core/funnel.ts';
 import { execFileSync } from 'child_process';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { cpus, totalmem } from 'os';
@@ -1207,6 +1208,7 @@ export async function runImport(
   }
 
   if (imported > 0 && !opts.managedBookmark) await refreshProjectionStatistics(engine, imported);
+  if (imported > 0) recordFunnelEvent('import');
   return {
     imported, skipped, errors, chunksCreated, failures,
     ...(resealSummary ? { resealed: resealSummary } : {}), ...fenceTally.fields(),

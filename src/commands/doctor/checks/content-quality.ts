@@ -12,7 +12,7 @@ import { startHeartbeat } from '../../../core/progress.ts';
 import { checkUnverifiedExtractions } from './extraction-sync.ts';
 import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
-import { agentFix, checkError } from '../check-fix.ts';
+import { agentFix, checkError, doctorVerify } from '../check-fix.ts';
 
 async function runContentSanity(ctx: DoctorContext): Promise<Check[]> {
   const { args, progress } = ctx;
@@ -50,14 +50,9 @@ async function runContentSanity(ctx: DoctorContext): Promise<Check[]> {
   const fullContentAudit = args.includes('--content-audit');
   progress.heartbeat('oversized_pages');
   try {
-    // Read effective bytes_block from the cached effectiveCfg loaded
-    // earlier in this doctor run if available; otherwise default.
-    // (We re-read here per-check to avoid threading config through
-    // every check — bytes_block is read once per doctor run via
-    // loadConfig which caches in module-level config layer.)
-    const { loadConfig: _loadCfg } = await import('../../../core/config.ts');
-    const _cfg = _loadCfg();
-    const bytesBlock = _cfg?.content_sanity?.bytes_block ?? 500_000;
+    // #6526: the write gate's bytes_block (the DB config plane over file and env),
+    // so a `gbrain config set content_sanity.bytes_block N` reaches this check too.
+    const bytesBlock = await (await import('../../../core/import-screen.ts')).effectiveBytesBlock(engine);
     // #1871: engine.executeRaw, not the dead-on-PGLite postgres singleton.
     const rows = await engine.executeRaw<{ slug: string; source_id: string; bytes: number }>(
       `SELECT p.slug, p.source_id,
@@ -70,7 +65,21 @@ async function runContentSanity(ctx: DoctorContext): Promise<Check[]> {
        LIMIT 100`,
       [bytesBlock],
     );
-    if (rows.length === 0) {
+    // Pages an older gbrain stored chunkless for size that now fit under the block: the free backfill re-indexes them.
+    const [skipped] = await engine.executeRaw<{ n: number }>(`SELECT COUNT(*)::int AS n FROM pages p
+       WHERE p.deleted_at IS NULL AND p.frontmatter->'embed_skip'->>'reason' = 'oversized'
+         AND (octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, ''))) <= $1`, [bytesBlock]);
+    const backfillable = Number(skipped?.n ?? 0);
+    if (backfillable > 0) {
+      checks.push({
+        name: 'oversized_pages',
+        status: 'warn',
+        message: `${backfillable} page(s) were stored without chunks by an older gbrain because of their size, and now fit under the ${bytesBlock}-byte bytes_block. `
+          + 'They are invisible to search until re-indexed. Fix: gbrain reindex --oversized (free, CPU only; pages over 1 MiB then wait for embedding approval).',
+        fix: agentFix(['gbrain', 'reindex', '--oversized'], 'Re-chunks the size-skipped pages so keyword search finds them; it calls no paid provider and holds large pages for embedding approval.',
+          'oversized_pages', { docs: 'docs/guides/memory-boundaries.md#large-pages-upgrade' }),
+      });
+    } else if (rows.length === 0) {
       checks.push({
         name: 'oversized_pages',
         status: 'ok',
@@ -84,7 +93,8 @@ async function runContentSanity(ctx: DoctorContext): Promise<Check[]> {
       checks.push({
         name: 'oversized_pages',
         status: 'warn',
-        message: `${rows.length} page(s) exceed ${bytesBlock}-byte block threshold. Top: ${top}. New ingests with the same shape get frontmatter.embed_skip set automatically; existing oversized pages can be split or accepted as non-embeddable.`,
+        message: `${rows.length} page(s) exceed the ${bytesBlock}-byte content_sanity.bytes_block. Top: ${top}. A page over the block is stored without chunks on its next write. `
+          + 'Raise content_sanity.bytes_block (up to the 24 MiB page ceiling) to make them searchable, or exclude them from the source.',
       });
     }
   } catch (err) {
@@ -94,6 +104,34 @@ async function runContentSanity(ctx: DoctorContext): Promise<Check[]> {
       status: 'ok',
       message: `Skipped (${msg})`,
     });
+  }
+
+  progress.heartbeat('partial_embedding');
+  try {
+    const { listBudgetLimitedPages } = await import('../../../core/page-embedding-budget.ts');
+    const limited = await listBudgetLimitedPages(engine, { limit: 100 });
+    if (limited.length === 0) {
+      checks.push({ name: 'partial_embedding', status: 'ok', message: 'No large page is held or capped by embed.max_usd_per_page.' });
+    } else {
+      const sources = [...new Set(limited.map(row => row.source_id))];
+      const sample = limited.slice(0, 3).map(row => `${row.slug} (${row.state}${row.reason ? `: ${row.reason}` : ''}, ${row.pending_chunks} chunk(s) without a vector)`).join('; ');
+      const approve = limited.length === 1
+        ? ['gbrain', 'embed', '--slugs', limited[0]!.slug, '--source', limited[0]!.source_id, '--max-usd', '<N>']
+        : ['gbrain', 'embed', '--held', ...(sources.length === 1 ? ['--source', sources[0]!] : []), '--max-usd', '<N>'];
+      checks.push({
+        name: 'partial_embedding',
+        status: 'warn',
+        message: `${limited.length} large page(s) are keyword-searchable but partially embedded: the per-page cap stopped them or they wait for approval. ${sample}. `
+          + `Preview the cost with gbrain embed --held --dry-run; with the user's approval: ${approve.join(' ')}`,
+        fix: { argv: approve, consent: ['paid', 'egress'], actor: 'agent', ask_user: true,
+          inputs: [{ name: 'N', how: 'The dollar amount the user approves per page, after seeing the cost from preview_argv.' }],
+          preview_argv: ['gbrain', 'embed', '--held', ...(sources.length === 1 ? ['--source', sources[0]!] : []), '--dry-run'],
+          why: 'Embedding the rest calls the paid embedding provider; the approved amount raises each page\'s cap (the lowest cap still wins).',
+          verify: doctorVerify('partial_embedding'), requires_exclusive: false, docs: 'docs/guides/memory-boundaries.md#large-pages' },
+      });
+    }
+  } catch (err) {
+    checks.push(checkError('partial_embedding', 'read the per-page embedding budget', err));
   }
 
   progress.heartbeat('scraper_junk_pages');
@@ -223,7 +261,7 @@ async function runContentSanity(ctx: DoctorContext): Promise<Check[]> {
 
 export const contentSanityEntry: DoctorEntry = {
   name: 'oversized_pages',
-  emits: ['oversized_pages', 'scraper_junk_pages', 'content_sanity_audit_recent'],
+  emits: ['oversized_pages', 'partial_embedding', 'scraper_junk_pages', 'content_sanity_audit_recent'],
   run: runContentSanity,
 };
 

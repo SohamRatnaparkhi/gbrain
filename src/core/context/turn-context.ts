@@ -187,6 +187,12 @@ export interface TurnContextResult {
    * owner's review command, never the content.
    */
   suppressed?: SuppressionSummary;
+  /**
+   * Wave 5 D5 (additive, wire back-compat): the proactive brief carried in
+   * `text`, present only when `context.proactive_brief` is on and the gate
+   * fired. The IPC delivery point logs and ledgers these items.
+   */
+  brief?: import('./proactive-brief.ts').BriefView;
 }
 
 export interface AssembleTurnContextOpts {

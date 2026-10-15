@@ -7,7 +7,7 @@ export type WriteRequestState = typeof WRITE_REQUEST_STATES[number];
 
 export const WRITE_ERROR_CODES = [
   'writer_lock_unavailable', 'writer_pool_capacity', 'owner_unavailable',
-  'recovery_required', 'queue_capacity', 'revision_required', 'revision_conflict',
+  'recovery_required', 'queue_capacity', 'write_quota_exhausted', 'write_quota_insufficient', 'write_capacity_backpressure', 'revision_required', 'revision_conflict',
   'idempotency_conflict', 'source_changed', 'write_pending', 'storage_error', 'cancelled',
   'permission_denied', 'scope_denied', 'invalid_params', 'not_found', 'page_not_found',
   'page_identity_changed', 'write_claim_lost', 'request_too_large', 'response_too_large',

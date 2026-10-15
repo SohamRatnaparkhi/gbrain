@@ -28,7 +28,7 @@ import { writeFailureDiagnostic } from './verb-errors.ts';
 export type TerminalCategory =
   | 'recovery_pending' | 'recovery_blocked'
   | 'knock_on' | 'run_replaced' | 'outside_fence'
-  | 'operator_cancelled' | 'caller_conflict' | 'file_conflict'
+  | 'operator_cancelled' | 'caller_conflict' | 'file_conflict' | 'canonical_file_missing' | 'fence_unrenderable'
   | 'writer_guard' | 'database_refusal' | 'owner_exception' | 'legacy_publication_refusal'
   | 'sync_fault' | 'transport' | 'caller_refusal' | 'gbrain_defect' | 'diagnosis_required';
 
@@ -81,6 +81,8 @@ export const TERMINAL_FIXED_IN = {
   // #5974/#5982: a guard P0001 is classified (writer_coordinator_required, origin database_guard) and the misread is fixed;
   // an unclassified "Publication failed (P0001)" receipt can only come from an older build.
   legacy_publication_refusal: '0.60.40.0',
+  // #6657: a refused fact-fence adoption is no longer resubmitted every cycle and keeps its metadata.
+  fence_unrenderable: '0.60.218.0',
 } as const satisfies Partial<Record<TerminalCategory, string>>;
 
 /** The connection-loss texts `classifySyncFault` reads as `connection_lost`; POSIX-compatible, so readers match it in SQL (`~*`). */
@@ -88,7 +90,7 @@ export const CONNECTION_MESSAGE_PATTERN = 'ECONN|ETIMEDOUT|EPIPE|connection.*clo
 /** The prefix of an unclassified database refusal written before #5974. */
 export const LEGACY_PUBLICATION_PREFIX = 'Publication failed (P0001)';
 
-const DEFECTS = new Set<TerminalCategory>(['outside_fence', 'writer_guard', 'database_refusal', 'owner_exception', 'gbrain_defect']);
+const DEFECTS = new Set<TerminalCategory>(['outside_fence', 'writer_guard', 'database_refusal', 'owner_exception', 'gbrain_defect', 'fence_unrenderable']);
 const FAULT_CODES = new Set(SYNC_FAULT_TABLE.map(rule => rule.code));
 const escalateOf = (code: string) => SYNC_FAULT_TABLE.find(rule => rule.code === code)?.escalate ?? 'always';
 
@@ -169,6 +171,14 @@ function route(input: TerminalInput): Partial_ {
     return { ...fromTable('knock_on', code, origin, syncRetry(source, `This page only waited on another page of the same sync${root ? ` (request ${root})` : ''}; a sync re-freezes it under a fresh request.`), 'knock_on'),
       ...(root ? { root_request_id: root } : {}) };
   }
+  if (code === 'fence_unrenderable' && origin === null) {
+    return { category: 'fence_unrenderable', code, origin, class: 'page', safe_actions: ['none'], needs_human: true,
+      human_reason: 'The fact-fence adoption planner produced a fence that does not read back as its facts: a gbrain planning defect to report with the page slug and version.',
+      escalate: 'always: a build with the adoption fix wrote it',
+      action: { argv: ['gbrain', 'doctor', '--only', 'fence_integrity', '--json'], consent: [], actor: 'agent', requires_exclusive: false,
+        why: 'A legacy fact row was not adopted into its page\'s facts fence; the row stays active and searchable. Doctor fence_integrity lists the pages and reason classes, read-only.',
+        verify: { argv: failuresArgv(source) }, docs: 'docs/guides/write-refusals.md#fence_unrenderable' } };
+  }
   if (origin === SYNC_CURSOR_FENCE_ORIGIN) {
     const cause = cursorFenceCause(detail);
     if (cause === 'outside_fence') return fromTable('outside_fence', code, origin, inspect(source, 'A sync request published outside the cursor that admitted it; writer status and sync status list the drains, read-only.',
@@ -226,6 +236,14 @@ function route(input: TerminalInput): Partial_ {
         action: { argv: ['gbrain', 'sources', 'reconcile', source, input.slug, '--preview'], consent: [], actor: 'agent', requires_exclusive: false,
           why: 'Previews both versions of the page and writes nothing; apply the resolved preview, then resubmit the write with a new request id.',
           verify: { argv: failuresArgv(source) }, docs: 'docs/guides/write-refusals.md#file_database_drift' } };
+    }
+    if (known === 'canonical_file_missing') {
+      return { category: 'canonical_file_missing', code, origin: origin ?? known, class: 'page', safe_actions: ['repair'], needs_human: true,
+        human_reason: 'The page\'s canonical file is gone but the database page is still live (a ghost page); a person chooses to restore the file or remove the page.',
+        escalate: 'always: no sync can import a file that is not there',
+        action: { argv: ['gbrain', 'repair', 'ghost-pages', '--source', source], consent: [], actor: 'agent', requires_exclusive: false,
+          why: 'Previews the live pages whose canonical file is missing and writes nothing; apply only after the user agrees, or restore the file and sync.',
+          verify: { argv: failuresArgv(source) }, docs: 'docs/guides/write-refusals.md#canonical_file_missing' } };
     }
     if (known === 'source_binding_changed' || known === 'unsafe_file_target') return diagnosis(input, code, known, `The write was refused source_changed (${known}).`);
     return fromTable('sync_fault', code, origin ?? known, syncRetry(source, `The file changed under the write (${known}); a sync imports the current bytes.`), known === 'pinned_git_worktree_conflict' ? known : 'source_changed');

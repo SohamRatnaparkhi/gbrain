@@ -206,6 +206,7 @@ test/jobs-gateway-refresh-set.test.ts	#3387 — GATEWAY_REFRESH_JOB_NAMES ⇔ re
 test/jobs-list-get-json.serial.test.ts	help advertises --json on list/get/stats (#3685)	2	source-surface-helper
 test/jobs-thin-client-date-rehydration.test.ts	thin-client unpack sites route through rehydrateJobDates (source audit)	2	source-surface-helper
 test/jobs-worker-startup-recovery.test.ts	work-handler recovery placement (structural)	1	source-surface-helper
+test/large-pages-skill-guidance.test.ts	large-page guidance in shipped skills	3	readFileSync
 test/link-source-check-repair.test.ts	regex literal drift guard (#4613)	1	readFileSync
 test/longmemeval-embed-cache.test.ts	EmbeddingCache — canonical hash	4	readFileSync
 test/loops-extract-wiring.test.ts	jobs.ts wiring	2	source-surface-helper
@@ -292,6 +293,7 @@ test/scripts/ci-manifest-diff.test.ts	test.yml dependency-audit scope	2	readFile
 test/scripts/ci-pr-scope.test.ts	pull-request CI scope	11	readFileSync
 test/scripts/ci-runner-routing.test.ts	CI runner routing	7	readFileSync
 test/scripts/classify-tests.test.ts	classify-tests detectors	23	bun-file,doctor-source-helper,exec-scan,readFileSync,source-surface-helper
+test/scripts/classify-tests.test.ts	structural-suites manifest	1	readFileSync
 test/scripts/coverage-diff-gate.test.ts	exemptions	3	readFileSync
 test/scripts/data-safety-native-workflow.test.ts	data-safety native CI coverage	13	readFileSync
 test/scripts/e2e-backend-matrix.test.ts	scripts/e2e-backend-matrix.txt	3	readFileSync

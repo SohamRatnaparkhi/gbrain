@@ -496,6 +496,43 @@ export async function callRemoteTool(
   }
 }
 
+/** One tool a remote serve lists for this token: its name and the parameter names its input schema declares. */
+export interface RemoteToolListing { name: string; params: string[] }
+
+/**
+ * #6696 B2: the tools a remote serve lists for this client's token (tools/list
+ * already filters by the token's scope and surface). Lets the thin client send
+ * a parameter only to a serve that advertises it. Same token handling as
+ * `callRemoteTool`: a cached token, one refresh on an HTTP 401.
+ */
+export async function listRemoteTools(config: GBrainConfig, opts: CallRemoteToolOptions = {}): Promise<RemoteToolListing[]> {
+  const remote = requireRemoteMcp(config);
+  const { signal, cleanup } = buildAbortController(opts);
+  const list = async (token: string): Promise<RemoteToolListing[]> => {
+    const client = await buildClient(remote.mcp_url, token, signal);
+    try {
+      const { tools } = await client.listTools(undefined, buildMcpRequestOptions(opts, signal));
+      return tools.map((t) => ({ name: t.name, params: Object.keys((t.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties ?? {}) }));
+    } finally {
+      try { await client.close(); } catch { /* best-effort */ }
+    }
+  };
+  try {
+    try {
+      return await list(await getAccessToken(config, false, signal));
+    } catch (e) {
+      signal.throwIfAborted();
+      if (!isStreamableHttpError(e) || e.code !== 401) throw e;
+      tokenCache.delete(remote.mcp_url);
+      return await list(await getAccessToken(config, true, signal));
+    }
+  } catch (e) {
+    throw toRemoteMcpError(e, remote.mcp_url, signal);
+  } finally {
+    cleanup();
+  }
+}
+
 /**
  * Extract the structured result from a successful tool-call response. The MCP
  * spec says tool results are returned as `content: Array<{type, text|...}>`.

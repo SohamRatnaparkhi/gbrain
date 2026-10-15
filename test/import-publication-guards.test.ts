@@ -166,7 +166,11 @@ for (const intervening of ['none', 'page', 'chunks', 'indexing-context'] as cons
         expect(after.snapshot!.page.compiled_truth).toBe(expected.snapshot!.page.compiled_truth);
         expect(after.chunks.map(chunk => [chunk.id, chunk.chunk_index, chunk.chunk_text])).toEqual(
           expected.chunks.map(chunk => [chunk.id, chunk.chunk_index, chunk.chunk_text]));
-        expect(after.chunks.every(chunk => chunk.embedding_is_null)).toBe(intervening !== 'none');
+        // A4: a chunk the page still holds with the same text and embedding input keeps the
+        // vector built for it; the late fragment, a changed body or a changed context gets none.
+        const kept = intervening === 'none' ? after.chunks : intervening === 'chunks' ? before.chunks : [];
+        expect(after.chunks.filter(chunk => !chunk.embedding_is_null).map(chunk => chunk.chunk_text))
+          .toEqual(kept.map(chunk => chunk.chunk_text));
       } finally {
         if (previousMode === null) await engine.executeRaw("DELETE FROM config WHERE key='contextual_retrieval.mode'");
         else await engine.setConfig('contextual_retrieval.mode', previousMode);

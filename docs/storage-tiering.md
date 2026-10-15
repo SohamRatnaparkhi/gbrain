@@ -36,6 +36,15 @@ Path requirements:
 
 - Each directory must end with `/` for canonical form. The validator auto-normalizes missing trailing slashes (one-time info note shows what changed).
 - A directory cannot appear in both tiers — that's a tier-overlap error and `loadStorageConfig` throws `StorageConfigError`. Edit `gbrain.yml` to remove the overlap and try again.
+- Any other key under `storage:` is ignored with a warning naming it (a typo such as `kep_db` used to be ignored silently).
+
+Optional: `keep_db:` lists directory prefixes whose drifted pages (the file and the database copy disagree, so writes refuse `source_changed`) the canonical owner host's resident consumer reconciles with the database copy, at most 10 every 10 minutes. It is opt-in, matches page slugs like the tiers, and changes nothing for other hosts or callers. See [the keep_db policy](guides/repair.md#file-drift-keep-db).
+
+```yaml
+storage:
+  keep_db:
+    - concepts/
+```
 
 ## Behavior Changes
 

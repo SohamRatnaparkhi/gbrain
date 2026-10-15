@@ -19,6 +19,8 @@ import { _exports_for_test as searchCommand } from '../../src/commands/search.ts
 import { buildTuneRecommendations } from '../../src/core/search/tune-recommendations.ts';
 import { configureGateway, resetGateway, __setEmbedTransportForTests } from '../../src/core/ai/gateway.ts';
 import { installFixtureChunks } from '../helpers/page-projection.ts';
+import { parseOpArgs } from '../../src/cli/main.ts';
+import { runConfig } from '../../src/commands/config.ts';
 
 const DIMS = 1536;
 const embedTransport = (async (p: { values: string[] }) => ({
@@ -125,6 +127,53 @@ describe('query expansion follows the search mode', () => {
       });
     }
   }
+});
+
+describe('per-brain off switch: `gbrain config set search.expansion false`', () => {
+  async function runQueryCli(argv: string[], probe: ReturnType<typeof spyHybrid>): Promise<number> {
+    const before = probe.expanderCalls.length;
+    await operationsByName.query.handler(makeCtx({}), parseOpArgs(operationsByName.query, argv));
+    return probe.expanderCalls.length - before;
+  }
+
+  test('unset expands in tokenmax, false stops it, an explicit --expand still wins, unset again restores it', async () => {
+    await resetSearchConfig('tokenmax', undefined);
+    const probe = spyHybrid(q => [q, `${q} alternate phrasing`]);
+    const log = spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(parseOpArgs(operationsByName.query, ['Zirconiumneedle retrieval'])).not.toHaveProperty('expand');
+      expect(await runQueryCli(['Zirconiumneedle retrieval'], probe)).toBe(1);
+
+      await runConfig(engine, ['set', 'search.expansion', 'false']);
+      expect(await engine.getConfig('search.expansion')).toBe('false');
+      expect((await buildModesReport(engine)).resolved.expansion).toMatchObject({ value: false, source: 'override' });
+      expect(await runQueryCli(['Zirconiumneedle retrieval'], probe)).toBe(0);
+      expect(await runQueryCli(['Zirconiumneedle retrieval', '--expand'], probe)).toBe(1);
+      expect(await runQueryCli(['Zirconiumneedle retrieval', '--no-expand'], probe)).toBe(0);
+
+      await runConfig(engine, ['unset', 'search.expansion']);
+      expect(await runQueryCli(['Zirconiumneedle retrieval'], probe)).toBe(1);
+    } finally {
+      log.mockRestore();
+      probe.restore();
+    }
+  });
+
+  test('recall never expands, even with search.expansion=true', async () => {
+    await resetSearchConfig('tokenmax', 'true');
+    const probe = spyHybrid(q => [q, `${q} alternate phrasing`]);
+    try {
+      await operationsByName.recall.handler(makeCtx({}), { query: 'Zirconiumneedle retrieval' });
+      expect(probe.options.length).toBeGreaterThan(0);
+      for (const opts of probe.options) {
+        expect(opts?.expansion).toBe(false);
+        expect(opts?.expandFn).toBeUndefined();
+      }
+      expect(probe.expanderCalls).toEqual([]);
+    } finally {
+      probe.restore();
+    }
+  });
 });
 
 describe('CRAG escalation reads what the first pass did', () => {

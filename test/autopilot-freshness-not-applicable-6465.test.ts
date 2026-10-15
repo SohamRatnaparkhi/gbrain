@@ -109,10 +109,23 @@ describe('autopilot on a brain whose source is a gbrain-owned content directory'
     const first = await freshnessTick();
     const second = await freshnessTick();
     const jobs = await queued();
-    // The checkout's two ticks coalesce on the waiting job (maxWaiting: 1); the content directory gets none.
+    // The checkout's two ticks coalesce on the pending job (maxPending: 1); the content directory gets none.
     expect(jobs.map(j => [j.name, j.data.sourceId])).toEqual([['sync', 'repo-example']]);
     const skips = [...first, ...second].map(l => JSON.parse(l)).filter(e => e.event === 'freshness_sync_skipped');
     expect(skips).toEqual([{ event: 'freshness_sync_skipped', source_id: 'notes-example', reason: 'sync_not_applicable' }]);
+  }));
+
+  test('#6706: a tick while the source\'s sync job is draining (active, live lock) coalesces into it instead of queueing a second drainer', () => inHome(async () => {
+    const repo = checkout('repo-example');
+    await addSource('repo-example', repo);
+    await freshnessTick();
+    await engine.executeRaw(`UPDATE minion_jobs SET status='active', started_at=now(), lock_until=now() + interval '5 minutes', lock_token='drain', claim_generation=claim_generation + 1 WHERE name='sync'`);
+    await freshnessTick();
+    expect((await queued()).map(j => [j.name, j.data.sourceId])).toEqual([['sync', 'repo-example']]);
+    // A lapsed lock (a dead worker) no longer suppresses dispatch, so the source is not wedged behind it.
+    await engine.executeRaw(`UPDATE minion_jobs SET lock_until=now() - interval '1 minute' WHERE name='sync'`);
+    await freshnessTick();
+    expect((await queued()).map(j => [j.name, j.data.sourceId])).toEqual([['sync', 'repo-example'], ['sync', 'repo-example']]);
   }));
 
   test('after the user runs git init there, the next tick dispatches it', () => inHome(async () => {

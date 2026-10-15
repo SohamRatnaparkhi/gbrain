@@ -30,6 +30,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { PAGE_MAX_BYTES } from '../src/core/page-size-policy.ts';
 
 let engine: PGLiteEngine;
 const repos: string[] = [];
@@ -1026,7 +1027,7 @@ describe('#3583 review: an over-size-gate fallback-regime file suspends deletes 
     // noise), but the liveness index reads the WORKING TREE — where the
     // file now sits over the gate. Concluding "no row possible" from the
     // current size would delete the row imported before the growth.
-    const bigBody = 'x'.repeat(5_100_000);
+    const bigBody = 'x'.repeat(PAGE_MAX_BYTES + 100_000);
     writeFileSync(join(repo, '\u{1F389}.md'), [
       '---', 'type: person', 'title: Party Notes', 'slug: Party-Notes', '---',
       '', bigBody,
@@ -1086,7 +1087,7 @@ describe('#3583 review: an over-size-gate fallback-regime file suspends deletes 
     // Now make the tracked-slug index incomplete, exactly as above.
     writeFileSync(join(repo, '\u{1F389}.md'), [
       '---', 'type: person', 'title: Party Notes', 'slug: Party-Notes', '---',
-      '', 'x'.repeat(5_100_000),
+      '', 'x'.repeat(PAGE_MAX_BYTES + 100_000),
     ].join('\n'));
     await engine.putPage('people/ghost', {
       type: 'person', title: 'Ghost (stale)', compiled_truth: 'no backing file anywhere',

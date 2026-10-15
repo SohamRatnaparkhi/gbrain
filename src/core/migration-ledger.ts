@@ -108,6 +108,14 @@ export function trailingPartialCount(entries: readonly CompletedMigrationEntry[]
   return consecutive;
 }
 
+/**
+ * Doctor's forward-progress rule (`minions_migration`): a partial or wedged version is history, not outstanding work, once a
+ * newer migration really ran (a `complete` entry that is not an init fresh-install stamp). Returns that newer version, or null.
+ */
+export function forwardProgressPast(version: string, entries: readonly CompletedMigrationEntry[]): string | null {
+  return entries.find(e => e.status === 'complete' && !isFreshInstallStamp(e) && compareVersions(e.version, version) > 0)?.version ?? null;
+}
+
 /** A ledger entry `gbrain init` wrote for a `fresh_install_noop` migration (src/commands/migrations/fresh-install.ts). */
 export function isFreshInstallStamp(entry: CompletedMigrationEntry): boolean {
   return entry.fresh_install === true;

@@ -5,7 +5,7 @@
  */
 
 import type { SearchResult } from '../types.ts';
-import { sanitizeRemoteBody } from '../remote-body.ts';
+import { projectedLead } from '../page-window/bounded-lead.ts';
 import { isIdentityEntity } from '../entities/resolve.ts';
 import { normalizeAlias } from './alias-normalize.ts';
 import { isPrivatePage } from './private-visibility.ts';
@@ -148,7 +148,7 @@ export async function applyAliasHopLookup(
     const page = await fetchAliasCanonical(engine, ref, opts);
     if (!page) continue;
     injectScore += 1e-6;
-    out.unshift(aliasInjectedRow(page, ref, injectScore));
+    out.unshift(await aliasInjectedRow(engine, page, ref, injectScore));
   }
   return out;
 }
@@ -192,7 +192,7 @@ async function applyAliasTokenHop(
     }
     const page = await fetchAliasCanonical(engine, ref, opts);
     if (!page || !isIdentityEntity(page.slug, page.type)) continue;
-    out.unshift(aliasInjectedRow(page, ref, injectScore));
+    out.unshift(await aliasInjectedRow(engine, page, ref, injectScore));
     hopped.add(key);
   }
   return out;
@@ -223,7 +223,7 @@ async function fetchAliasCanonical(
   return page;
 }
 
-function aliasInjectedRow(page: import('../types.ts').Page, ref: { source_id: string }, score: number): SearchResult {
+async function aliasInjectedRow(engine: import('../engine.ts').BrainEngine, page: import('../types.ts').Page, ref: { source_id: string }, score: number): Promise<SearchResult> {
   return {
     // #2339-sibling: include page_id. The `as SearchResult` cast hid its
     // absence, so any consumer reading page_id off an alias-injected result got
@@ -234,7 +234,8 @@ function aliasInjectedRow(page: import('../types.ts').Page, ref: { source_id: st
     title: page.title,
     type: page.type,
     source_id: page.source_id ?? ref.source_id,
-    chunk_text: sanitizeRemoteBody(page.compiled_truth ?? '').slice(0, 200),
+    // Large pages: a bounded, withdrawal-overlaid prefix is sanitized, never the whole body.
+    chunk_text: (await projectedLead(engine, { slug: page.slug, source_id: page.source_id ?? ref.source_id, compiled_truth: page.compiled_truth })).slice(0, 200),
     chunk_index: 0,
     chunk_id: 0,
     score,

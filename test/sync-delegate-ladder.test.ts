@@ -66,8 +66,8 @@ function captureConsoleError(): { lines: string[]; restore: () => void } {
 }
 
 describe('parseDelegatedSyncArgs (default-deny)', () => {
-  test('bare sync → empty options, no explicit source', () => {
-    expect(parseDelegatedSyncArgs([])).toEqual({ ok: true, options: {}, explicitSource: null });
+  test('bare sync → no options but an empty explicit-processing list (#6696: a flagless run adopts the cursor), no explicit source', () => {
+    expect(parseDelegatedSyncArgs([])).toEqual({ ok: true, options: { explicitProcessing: [] }, explicitSource: null });
   });
 
   test('the full wire-forwardable set maps field-for-field', () => {
@@ -105,7 +105,7 @@ describe('parseDelegatedSyncArgs (default-deny)', () => {
   test('#6317: the managed catch-up flags are admitted explicitly (--json is rendered by this client, never forwarded)', () => {
     const r = parseDelegatedSyncArgs(['--source', 'notes', '--no-pull', '--json', '--no-bulk', '--lanes', '4', '--no-embed']);
     expect(r).toEqual({ ok: true, explicitSource: 'notes', options: { noPull: true, noBulk: true, lanes: 4, noEmbed: true, explicitProcessing: ['noEmbed'] } });
-    expect(parseDelegatedSyncArgs(['--no-lanes'])).toEqual({ ok: true, explicitSource: null, options: { lanes: 1 } });
+    expect(parseDelegatedSyncArgs(['--no-lanes'])).toEqual({ ok: true, explicitSource: null, options: { lanes: 1, explicitProcessing: [] } });
     expect(parseDelegatedSyncArgs(['--lanes', '0'])).toEqual({ ok: false, refused: '--lanes (invalid value)' });
     expect(parseDelegatedSyncArgs(['--lanes', '17'])).toEqual({ ok: false, refused: '--lanes (invalid value)' });
     expect(parseDelegatedSyncArgs(['--lanes', 'four'])).toEqual({ ok: false, refused: '--lanes (invalid value)' });

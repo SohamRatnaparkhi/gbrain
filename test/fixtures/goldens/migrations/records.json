@@ -1,6 +1,6 @@
 {
   "golden": {
-    "count": 238,
+    "count": 242,
     "gaps": [
       17,
       18,
@@ -9,6 +9,7 @@
     ],
     "helpers": {
       "ALIAS_TABLES": "cddd37c636af42d862c08ca7754a57dfe9d12576b769fa8f74a5f02c803f67a0",
+      "BOUNDED_TIMELINE_CHECKPOINT": "385c4da3e28732343148795d6e9a86670813a7a7cfa1e52f8a5bb494680a3c0d",
       "CHECKPOINT": "3c6ff909363c4ba1c9d730e748654ab90aa07549ddf4bf36b8f93c5f4ea3680b",
       "FACT_PURGES_ALL_SUBJECTS_INDEX": "99e2eb6c24134b539cb4cfd6e5ff66a724463525d09e9ba1fdde3c13f5787b6c",
       "FACT_PURGES_SUBJECT_INDEX": "f4fba07082f2e26da3fa51b0b689f3fe78a3d09afd20c1924dbc2fbe6b1560f1",
@@ -20,6 +21,7 @@
       "OPEN_LOOPS_COUNTERPARTY_SOURCE_INDEX": "e9b472d9db37733e908ea40512ad3f9520d7a6729ce207b0d279d43d3beb5b2f",
       "PAGES_NAME_LOOKUP_INDEXES": "1ca830342164b5606e96cf0090645364f9145d36178d90f166230189fe8d2705",
       "PAGES_RECONCILE_NAME_INDEXES": "8805e35341b22324b932b1cc05030cc8f2bfc95532bf810ec35330783f29c59a",
+      "PAGE_TIMELINE_FTS_MAX_CHARS": "f7d29264f4144976bbe2e1ded0251095b638175f8e1d711c36f1e80d2263e172",
       "PERSISTENCE_COMMITTED_WATERMARK_INDEX": "f472fa0acb542c1caebaaa3bc69fb2da1647e5e201239429fc02ccef0d669533",
       "PERSISTENCE_COMPACTABLE_INDEX": "25ee657878efb41ba9ea3a7624464ddcf66407d861659456c230366e57f230a0",
       "PERSISTENCE_DATABASE_PENDING_INDEX_SQL": "6e0f618be33d037454933ea4dea11438413d45aef35d3bd4f33e89624d6e199e",
@@ -44,7 +46,7 @@
       "migrateConnectorCheckpoints": "e0403022a56559556c82a9fa1e90d928f36e1d09c7db570e1d788a87d2dc9521",
       "migrateLegacyTokens": "6e4abe3670127e7a495b56ecbf9f5789edd3a7362d45704656c2210a85b27f4c",
       "migrationNotice": "9a6607b26a9719ef1833571b137bc8ebfcd1e16d545e89ff8728cf3ccbcbb409",
-      "pageSearchVectorTriggerFnSql": "c31a80562c8053479344d6060115a24854b1f419f6e09945f36b1403305f54e6",
+      "pageSearchVectorTriggerFnSql": "f9f083978d2a5cd756a889781ee07a921132c4db9d3cfa1b041da2af95a4a4b5",
       "quietMigrationNotices": "4045c32034a8f46204dd5d89e185ff5c35e8073f560f14caa8b127f8a695957c",
       "readExistingEmbeddingShape": "16d92d7cd52d8ebd7e89982f02e1bbdd8e8d08a6712a4ce57fbcf0952b7a6ca5",
       "repairLegacyClientGrants": "c1dc6b1d0c4933c041583aa1c4eacaefc0ff0ae2a67f56cfad7534f87a5ab309",
@@ -54,7 +56,7 @@
       "sqlQueryForEngine": "71fb1ccec1b22cdc1662876dbd8c17ed81e9ab83485c6965cdf5caa4fc4a4ab5",
       "verifyProjectionStatistics": "0d231b04ecfbc5a4109d6fca9567bf4e8c9e9db6c3fbbb35212e026579ed6f67"
     },
-    "latest": 243,
+    "latest": 247,
     "records": [
       {
         "handler": {
@@ -3697,6 +3699,71 @@
         "transaction": "absent",
         "verify": "absent",
         "version": 243
+      },
+      {
+        "handler": "absent",
+        "idempotent": true,
+        "name": "chunk_projected_spans",
+        "sql": {
+          "length": 171,
+          "sha256": "abc04e738f487873c5c7f676ca01643d0f2554204dda36799a093fc7bc02d988"
+        },
+        "sqlFor": "absent",
+        "transaction": "absent",
+        "verify": "absent",
+        "version": 244
+      },
+      {
+        "handler": {
+          "form": "arrow",
+          "helpers": [
+            "BOUNDED_TIMELINE_CHECKPOINT",
+            "PAGE_TIMELINE_FTS_MAX_CHARS",
+            "backfillPageVectors",
+            "checkpointKey",
+            "getFtsLanguage",
+            "migrationNotice",
+            "pageSearchVectorTriggerFnSql",
+            "quietMigrationNotices"
+          ],
+          "sha256": "fd60ac122a6cc9ccc3986dad825d76b1322eaf2760689c6523198165aa4a4d22"
+        },
+        "idempotent": true,
+        "name": "page_search_vector_bounded_timeline",
+        "sql": {
+          "length": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "sqlFor": "absent",
+        "transaction": "absent",
+        "verify": "absent",
+        "version": 245
+      },
+      {
+        "handler": "absent",
+        "idempotent": true,
+        "name": "page_embedding_budget",
+        "sql": {
+          "length": 785,
+          "sha256": "ec11068c49b813afcfb5c4497f5423f8bf71eb5f24c0ae196326bb2175f66680"
+        },
+        "sqlFor": "absent",
+        "transaction": "absent",
+        "verify": "absent",
+        "version": 246
+      },
+      {
+        "handler": "absent",
+        "idempotent": true,
+        "name": "page_extraction_state",
+        "sql": {
+          "length": 644,
+          "sha256": "f2189cbc318857938dc6d8081c53e93e5ec6372a9402f34029ee9cbf7c376934"
+        },
+        "sqlFor": "absent",
+        "transaction": "absent",
+        "verify": "absent",
+        "version": 247
       }
     ],
     "versions": [
@@ -3937,7 +4004,11 @@
       240,
       241,
       242,
-      243
+      243,
+      244,
+      245,
+      246,
+      247
     ]
   },
   "normalizer": "migrations-record-v1"

@@ -2,7 +2,7 @@
 import { OperationError, opError, type Operation, type OperationContext } from './contract.ts';
 import { invalidParam, readFix } from './op-fix.ts';
 import { isValidSourceId } from '../source-id.ts';
-import { enforceBoundClientOpAllowList, enforceClientSlugFence, enforceSubagentSlugFence, normalizeSlugPrefix, parseSourceIdParam, readPolicyOpts } from './context.ts';
+import { enforceBoundClientOpAllowList, enforceClientSlugFence, enforceSubagentSlugFence, normalizeSlugPrefix, parseSourceIdParam, readPolicyOpts, resolveRequestedScope } from './context.ts';
 import { hasScope } from '../scope.ts';
 import { normalizeTokenScopes } from '../legacy-token-scope.ts';
 import { parseWriteRequestId } from '../persistence/preconditions.ts';
@@ -218,6 +218,8 @@ export const persistenceOperations: Operation[] = [
     cliHints: { name: 'write-conflicts' },
     handler: async (ctx, params) => {
       const sourceId = parseSourceIdParam(params.source_id ?? ctx.sourceId, 'list_write_conflicts') ?? 'default';
+      // A remote caller naming a source outside its grant is refused like every source-scoped read (permission_denied, whether or not it exists).
+      if (params.source_id !== undefined) resolveRequestedScope(ctx, sourceId);
       const limit = params.limit ?? 25;
       if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 100) throw invalidParam(ctx, 'list_write_conflicts', 'limit', 'limit must be an integer from 1 to 100.', { example: 25 });
       if (params.cursor !== undefined && typeof params.cursor !== 'string') throw opError('invalid_params', 'Invalid conflict cursor.', "Pass `cursor` exactly as the previous response's `next` value.");

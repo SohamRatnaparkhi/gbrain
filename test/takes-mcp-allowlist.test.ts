@@ -178,7 +178,7 @@ describe('per-token takes-holder allow-list — get_versions body channel', () =
   });
 
   test('remote token with allow-list strips fence from every snapshot', async () => {
-    const result = await dispatchToolCall(engine, 'get_versions', { slug: SLUG }, {
+    const result = await dispatchToolCall(engine, 'get_versions', { slug: SLUG, include_body: true }, {
       remote: true, sourceId: 'default',      takesHoldersAllowList: ['world'],
     });
     const versions = parseResult(result) as Array<{ compiled_truth: string }>;
@@ -190,7 +190,7 @@ describe('per-token takes-holder allow-list — get_versions body channel', () =
   });
 
   test('local CLI sees historical takes in snapshots', async () => {
-    const result = await dispatchToolCall(engine, 'get_versions', { slug: SLUG }, {
+    const result = await dispatchToolCall(engine, 'get_versions', { slug: SLUG, include_body: true }, {
       remote: false,
     });
     const versions = parseResult(result) as Array<{ compiled_truth: string }>;

@@ -51,6 +51,7 @@ const EXEMPT: Record<string, string> = {
   'src/core/repair/captured-facts.ts': 'owner repair of existing rows',
   'src/core/repair/extractor-facts.ts': 'owner repair of existing rows',
   'src/core/repair/frontmatter.ts': 'owner repair of existing frontmatter',
+  'src/core/repair/ghost-pages.ts': 'retires an owner-approved ghost page (version + soft delete, lifecycle); no new text',
   'src/core/repair/ontology-facts.ts': 'owner repair restoring existing ontology rows',
   'src/core/repair/stale-atoms.ts': 'retires stale atoms (lifecycle)',
   'src/core/repair/take-supersession.ts': 'owner repair of take supersession pointers',

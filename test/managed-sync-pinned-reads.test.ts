@@ -32,6 +32,7 @@ import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { __setPinnedWindowForTests } from '../src/core/persistence/sync-blobs.ts';
 import { syncGitTopLevel } from '../src/core/persistence/sync-prepare.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { PAGE_MAX_BYTES } from '../src/core/page-size-policy.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-pinned-reads-'));
 const SOURCE = 'pinned-reads';
@@ -76,7 +77,7 @@ const corpus = (): Record<string, string> => ({
   'vault/notes/crlf.md': '---\r\ntitle: Line endings\r\ntype: note\r\n---\r\nWritten with CRLF line endings.\r\n',
   'vault/notes/conflict.md': '---\ntitle: Conflict\nslug: notes/somewhere-else\n---\nDeclares a slug its path does not have.\n',
   'vault/notes/broken.md': '---\ntitle: first line of a title\nsecond line of the title\n---\nA synthetic note.\n',
-  'vault/big/oversize.md': `---\ntitle: Oversize\n---\n${'x'.repeat(10 * 1024 ** 2 + 64)}\n`,
+  'vault/big/oversize.md': `---\ntitle: Oversize\n---\n${'x'.repeat(PAGE_MAX_BYTES + 64)}\n`,
   'outside/readme.md': '# Not in the source\n',
 });
 function secondRound(root: string) {

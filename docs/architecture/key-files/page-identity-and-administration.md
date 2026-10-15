@@ -15,7 +15,7 @@ records refuse without deleting uncertain state. Regression coverage:
 `test/persistence-admin-recovery.test.ts`, `test/persistence-onboarding.test.ts`,
 `test/persistence-container-preflight.test.ts`.
 
-- `src/core/deep-research-id.ts` — canonical `gbrain-page:v1:` handles encode a
+- `src/core/deep-research-id.ts` — canonical `gbrain-page:v1:` handles encode a An id may carry a read anchor as a third payload element (`{c: chunk_id}` for a search hit past the first chunk, `{w: cursor}` for a fetch continuation); `decodeDeepResearchId` returns the same page key with or without it and `decodeDeepResearchAnchor` returns the anchor.
   JSON pair of source ID and slug in unpadded base64url. The decoder rejects
   malformed or noncanonical encodings rather than treating them as legacy
   slugs. IDs are logical addresses, not credentials, revisions or encrypted

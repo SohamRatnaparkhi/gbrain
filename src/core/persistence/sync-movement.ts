@@ -67,7 +67,8 @@ export interface SourceMovement {
   holds: MovementHolds;
   /** Managed requests admitted on the worktree and not yet settled (queued or running). */
   admitted: number;
-  live: { drain: boolean; drain_pid: number | null; consumer: 'claim' | 'local' | 'heartbeat' | null };
+  /** #6706: `drain_job_id` is the active `sync` Minions job with a live lock that drives this source, when no CLI drain holds the sync lock. */
+  live: { drain: boolean; drain_pid: number | null; drain_job_id: number | null; consumer: 'claim' | 'local' | 'heartbeat' | null };
   ceiling_ms: number;
   owner_is_this_host: boolean | null;
   writer_status_command: string;
@@ -94,6 +95,14 @@ interface BindingRow { source_id: string; worktree_id: string; source_incarnatio
 interface WatermarkRow { last_commit_at: unknown; admitted: number | string }
 interface HeadRow { request_id: string; state: string; claim_phase: unknown; execution_token: string | null; claim_lapsed: boolean | null; publication_started: boolean | null }
 interface HoldRow { count: number | string | null; stalled: number | string | null; fences: number | string | null; concurrent: number | string | null; updated_at: unknown }
+
+/** #6706: the id of the active `sync` Minions job with a live lock that is draining `sourceId`, or null. Never rejects. */
+export async function liveSyncJob(engine: BrainEngine, sourceId: string): Promise<number | null> {
+  const [row] = await engine.executeRaw<{ id: number | string }>(`SELECT id FROM minion_jobs WHERE name='sync' AND status='active' AND lock_until > now()
+    AND (COALESCE(data->>'sourceId', data->>'source_id')=$1 OR (COALESCE(data->>'sourceId', data->>'source_id') IS NULL
+      AND (data->>'repoPath' IS NULL AND $1='default' OR data->>'repoPath'=(SELECT local_path FROM sources WHERE id=$1)))) ORDER BY started_at LIMIT 1`, [sourceId]).catch(() => []);
+  return row ? Number(row.id) : null;
+}
 
 /** The movement of every active managed source (or of `sourceIds`), one bounded read each; sources without a binding are omitted. */
 export async function readSourceMovement(engine: BrainEngine, opts: { sourceIds?: string[]; now?: number } = {}): Promise<SourceMovement[]> {
@@ -129,6 +138,7 @@ export async function readSourceMovement(engine: BrainEngine, opts: { sourceIds?
     const head: MovementHead | null = headRow ? { request_id: headRow.request_id, state: headRow.state, phase: claim?.phase ?? null, step: claim?.step ?? null, step_since: stampSince,
       step_age_ms: claim?.step_age_ms ?? null, waiting_on: claim?.waiting_on ?? null, owner: claim?.owner ?? null, last_sql: claim?.last_sql ?? null, lapsed: headRow.claim_lapsed === true } : null;
     const drain = await liveSyncStatus(engine, binding.source_id);
+    const jobDrain = drain ? null : await liveSyncJob(engine, binding.source_id);
     const ownerHere = binding.owner_host_id === null ? null : binding.owner_host_id === host;
     const claimLive = !!claim && (claim.phase === 'preparing' || claim.phase === 'publishing');
     const consumer: SourceMovement['live']['consumer'] = claimLive ? 'claim' : ownerHere !== false && localConsumer ? 'local' : ownerHere !== false && await liveHeartbeat() ? 'heartbeat' : null;
@@ -140,7 +150,7 @@ export async function readSourceMovement(engine: BrainEngine, opts: { sourceIds?
     const sampledAt = new Date(now).toISOString();
     const base = { source_id: binding.source_id, sampled_at: sampledAt, last_commit_at: lastCommitAt, last_progress_at: progressAt,
       cursor: cursor ? { index: cursor.index, total: cursor.total, remaining: cursor.remaining, held: cursor.held, last_progress_at: cursor.last_progress_at, resume_command: cursor.resume_command } : null,
-      head, holds, admitted, live: { drain: !!drain, drain_pid: drain?.holder_pid ?? null, consumer }, ceiling_ms: policy.ceilingMs, owner_is_this_host: ownerHere,
+      head, holds, admitted, live: { drain: !!drain || !!jobDrain, drain_pid: drain?.holder_pid ?? null, drain_job_id: jobDrain, consumer }, ceiling_ms: policy.ceilingMs, owner_is_this_host: ownerHere,
       writer_status_command: writerStatusCommand(binding.source_id) };
     out.push({ ...base, ...verdict(base, now) });
   }

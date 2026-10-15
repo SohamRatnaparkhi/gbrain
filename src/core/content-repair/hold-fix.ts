@@ -22,6 +22,9 @@
  *   run retries after `next_attempt_after`.
  * - `remove_slug` recorded (the edit could not be written: `canonical_overlay`,
  *   `still_invalid`, `changed_since_read`): the exact one-line edit by hand.
+ * - `slug_page_mismatch` (#6696 C8): sync files the file as a page whose
+ *   slug the file does not carry, so removing the line would not clear it:
+ *   name that page's slug exactly or move the file.
  *
  * Location only: path, slugs, codes and amounts.
  */
@@ -41,6 +44,7 @@ export function contentPreviewArgv(sourceId: string, path?: string): string[] {
 export function contentHoldDocs(state: ContentHoldRepairState | undefined): string {
   if (state?.action === 'merge_into') return 'docs/guides/write-refusals.md#merge_recommended';
   if (state?.action === 'needs_human') return 'docs/guides/write-refusals.md#content_repair_needs_human';
+  if (state?.reason === 'slug_page_mismatch') return 'docs/guides/write-refusals.md#slug_page_mismatch';
   return 'docs/guides/write-refusals.md#frontmatter_slug_conflict';
 }
 
@@ -92,6 +96,12 @@ export function contentHoldFix(record: { source_id: string; path: string; slug?:
     return { ...base, actor: 'agent',
       why: `${record.path} is held until the content-repair model can judge it (${state.reason}); the maintenance run tries again${state.next_attempt_after ? ` after ${state.next_attempt_after}` : ''}. `
         + `Run the preview now to retry immediately (read-only), then its apply command.` };
+  }
+  if (state.reason === 'slug_page_mismatch') {
+    return { ...base, actor: 'agent',
+      why: `Sync files ${record.path} as page ${record.slug ?? '?'}, and ${state.named && state.named !== record.slug ? `its path derives ${state.named}` : 'its slug: line does not name that page as written'}, `
+        + `so removing the line would not clear the hold (slug_page_mismatch). By hand: make the slug: line name ${record.slug ?? 'the page'} exactly or move the file to the path that derives it, `
+        + `commit, and run gbrain sync --source ${source} --no-pull; the preview shows the current state.` };
   }
   return { ...base, actor: 'agent',
     why: `gbrain decided to remove the slug: line of ${record.path} but could not write it (${state.reason}); the preview shows the current state. `

@@ -1,4 +1,5 @@
 import { searchAnswerFeedback } from '../feedback/record.ts';
+import { recordFunnelEvent, recordRecallOutcome } from '../funnel.ts';
 import { parseRelationalPlan } from '../search/relational-plan.ts';
 import { loadSearchModeConfig, resolveSearchMode } from '../search/mode.ts';
 import { WRITE_REQUEST_PARAM } from '../persistence/params.ts';
@@ -563,7 +564,7 @@ const recall: Operation = {
     const budgetPacking = recallBudgetPacking(p.budget_policy, queryText, budgetTokens, { rows, packedFacts, searchResults, packedResults }, recallResultCost(delivery));
 
     if (cloud.mode) ctx.emitResponseMeta?.('hydradb', { mode: cloud.mode, markdown: markdownForHydraRows(packedResults, cloud.original, budgetTokens !== null) });
-    return {
+    const out = {
       facts: await withFactDateHeaders(ctx.engine, await stampRowTrust(ctx.engine, 'facts', packedFacts.map(r => ({ // #5575 A6: + trust_tier, origin, unconfirmed
         id: r.id,
         fact: r.fact,
@@ -628,6 +629,8 @@ const recall: Operation = {
       ...(budgetPacking ? { budget_packing: budgetPacking } : {}),
       ...(delivery ? { delivery } : {}),
     };
+    recordRecallOutcome(out);
+    return out;
   },
 };
 
@@ -674,6 +677,9 @@ async function withProvenance<T extends { id: number }>(engine: BrainEngine, sou
   return facts.map((f) => ({ ...f, provenance: byId.get(f.id) ?? null }));
 }
 
+/** context_pack `intent` values; pinned equal to proactive-brief.ts BRIEF_INTENTS by test (kept literal so this module stays import-light). */
+export const BRIEF_INTENTS = ['meeting', 'reply'] as const;
+
 const context_pack: Operation = {
   name: 'context_pack',
   mutating: false,
@@ -688,6 +694,8 @@ const context_pack: Operation = {
     include_private: { type: 'boolean', description: 'Local trusted callers only.' },
     min_trust: MIN_TRUST_PARAM,
     include_quarantined: { type: 'boolean', description: 'Admin or memory_confirm: quarantined cards.', fullSurfaceOnly: true },
+    counterparty: { type: 'string', description: 'Person or company (name or slug): adds a pulled brief of dated items about them.', fullSurfaceOnly: true },
+    intent: { type: 'string', enum: [...BRIEF_INTENTS], description: 'With counterparty: the task the brief is for.', fullSurfaceOnly: true },
   },
   scope: 'read',
   verb: true,
@@ -721,6 +729,11 @@ const context_pack: Operation = {
         : null;
     // #5575 (CEO-20, CEO-18): a proactive surface under the connection's floor.
     const eligibility = await proactiveEligibility(ctx, 'context_pack', { minTrust: p.min_trust });
+    // Wave 5 D5 pull brief: only when the caller names a counterparty (the
+    // push switch is not read; nothing changes for a caller that does not
+    // pass it). Open loops are trusted-local only; the change arm is
+    // world-only unless a trusted caller widened with include_private.
+    const pullBrief = await contextPackBrief(ctx, p, { sourceId, includePrivate, eligibility });
     const res = entities.length === 0
       ? { cards: [], facts: [], text: '', pointers: [], factsCount: 0 } as unknown as Awaited<ReturnType<typeof assembleContextPack>>
       : await assembleContextPack(ctx.engine, {
@@ -762,7 +775,7 @@ const context_pack: Operation = {
     if (budgetTokens !== null) {
       // #4761: reserve the envelope + headers, then price each card as its
       // rendered line plus its rendered (since-filtered) thread lines.
-      const itemBudget = budgetTokens - packHeaderCost() - coreTokens;
+      const itemBudget = budgetTokens - packHeaderCost() - coreTokens - (pullBrief?.text ? estimateTokens(pullBrief.text) : 0);
       const cardCost = (c: (typeof cards)[number]) =>
         lineCost(renderCardLine(c)) + threadsOf(c).reduce((n, t) => n + lineCost(renderThreadLine(t)), 0);
       const cardPack = itemBudget > 0 ? packToBudget(cards, cardCost, itemBudget) : dropAll(cards);
@@ -786,7 +799,7 @@ const context_pack: Operation = {
     // structured arrays report — the assembler's pre-budget rendering would
     // overrun the declared budget_tokens. budget_used reports that text.
     const packText = entities.length === 0 ? '' : budgetTokens !== null ? renderPack(cards, open_threads, facts) : res.text;
-    const text = [coreText, packText].filter(Boolean).join('\n\n');
+    const text = [coreText, pullBrief?.text ?? '', packText].filter(Boolean).join('\n\n');
     const budgetUsed = budgetTokens !== null ? estimateTokens(text) : undefined;
 
     return {
@@ -821,6 +834,7 @@ const context_pack: Operation = {
         ...(f.trust_tier ? { trust_tier: f.trust_tier, origin: f.origin } : {}),
       })),
       text,
+      ...(pullBrief ? { brief: pullBrief.view } : {}),
       ...(withheld ? { suppressed: suppressionSummary(withheld) } : {}),
       ...(core && core.enabled ? { core: { text: core.text, chars_used: core.chars_used, chars_limit: core.chars_limit, pages: core.pages,
         truncated: core.truncated, revision: core.revision } } : {}),
@@ -834,6 +848,52 @@ const context_pack: Operation = {
     };
   },
 };
+
+/**
+ * context_pack's pull brief (wave 5 D5): null unless `counterparty` is given.
+ * An unresolved counterparty is a labelled empty brief, not an error; an
+ * invalid `intent` is invalid_params.
+ */
+async function contextPackBrief(
+  ctx: OperationContext,
+  p: Record<string, unknown>,
+  opts: { sourceId: string; includePrivate: boolean; eligibility: import('../eligibility/policy.ts').ReadEligibility },
+): Promise<{ text: string; view: Record<string, unknown> } | null> {
+  if (typeof p.counterparty !== 'string' || !p.counterparty.trim()) return null;
+  if (p.intent !== undefined && !(BRIEF_INTENTS as readonly unknown[]).includes(p.intent)) {
+    throw verbError(
+      'invalid_params',
+      `context_pack: intent must be one of ${BRIEF_INTENTS.join(', ')}`,
+      `Pass ${paramUse(ctx, 'intent', 'meeting')} or omit it.`,
+    );
+  }
+  const { resolvePullCounterparty, assembleBrief, briefView } = await import('../context/proactive-brief.ts');
+  const local = ctx.remote === false;
+  const label = {
+    delivery: 'pull' as const,
+    intent: (p.intent as string | undefined) ?? null,
+    ...(local ? {} : { withheld_arms: ['loops'] }),
+  };
+  const cp = await resolvePullCounterparty(ctx.engine, opts.sourceId, p.counterparty.slice(0, 200), {
+    excludePrivate: !opts.includePrivate, eligibility: opts.eligibility,
+  });
+  if (!cp) return { text: '', view: { ...label, counterparty: null, items: [], reason: 'counterparty_unresolved' } };
+  const now = Date.now();
+  const brief = await assembleBrief(ctx.engine, {
+    trigger: 'pull',
+    counterparties: [cp],
+    local,
+    includePrivate: opts.includePrivate,
+    eligibility: opts.eligibility,
+    clock: { now, stopAt: now + CONTEXT_PACK_BRIEF_BUDGET_MS },
+  });
+  const counterparty = { slug: cp.slug, display: cp.display };
+  if (!brief) return { text: '', view: { ...label, counterparty, items: [], reason: 'no_items' } };
+  return { text: brief.text, view: { ...label, counterparty, items: briefView(brief).items } };
+}
+
+/** Wall-clock cap on the pull brief's queries. */
+const CONTEXT_PACK_BRIEF_BUDGET_MS = 1000;
 
 const delta: Operation = {
   name: 'delta',
@@ -1237,7 +1297,9 @@ const forget_fact: Operation = {
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'forget_fact', id: p.id };
     const { submitForgetMutation } = await import('../persistence/memory-mutations.ts');
-    return submitForgetMutation(ctx, 'forget_fact', p);
+    const out = await submitForgetMutation(ctx, 'forget_fact', p);
+    recordFunnelEvent('withdrawal');
+    return out;
   },
 };
 

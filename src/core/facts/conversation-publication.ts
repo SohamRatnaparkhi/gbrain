@@ -47,6 +47,7 @@
  * row numbers under the page lock, and fails the request when an insert is
  * lost.
  */
+import { backgroundPaused, readBackgroundPauseShare } from '../persistence/admission-origin.ts';
 import type { BrainEngine, NewFact } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import type { Page } from '../types.ts';
@@ -60,8 +61,9 @@ import { opError, OperationError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
 import { authorizeStoredRequest, authorizeWrite } from '../persistence/authority.ts';
 import { digest, jsonBytes } from '../persistence/digest.ts';
+import { receiptReservation } from '../persistence/receipt-bytes.ts';
 import { getWriteRequestById } from '../persistence/journal.ts';
-import { readJournalLimits } from '../persistence/limits.ts';
+import { journalLimitKey, oneYearCapacity, readJournalLimits } from '../persistence/limits.ts';
 import { principalKey } from '../persistence/model.ts';
 import { PERSISTENCE_IPC_MAX_BYTES } from '../persistence/ipc.ts';
 import { resolveManagedFactsEmbedding } from '../persistence/facts-maintenance.ts';
@@ -242,43 +244,42 @@ export async function conversationIntentByteLimit(engine: BrainEngine): Promise<
 }
 
 /**
- * Before model work: stop admitting once this writer's outstanding requests,
- * reserved receipt bytes or permanent request ids would pass
- * OUTSTANDING_ADMISSION_SHARE of their limit. The writer is the local CLI
- * principal the user's own CLI writes share, so the last 20% stays theirs:
- * reserved receipt bytes free only when receipts compact (after the retention
- * window), request ids never. `needed` is the run's planned batch requests
- * up front, 1 before each new batch; the suggested `--limit` is in pages.
+ * Before model work: stop admitting once this writer's outstanding requests
+ * pass OUTSTANDING_ADMISSION_SHARE of their limit (`maintenance_backpressure`,
+ * retryable: they settle), or its reserved receipt bytes or permanent request
+ * ids would pass the background pause line (`write_capacity_backpressure`,
+ * host-only, A5): the writer is the local CLI principal the user's own CLI
+ * writes share, so the rest stays theirs. Reserved receipt bytes free only
+ * when receipts compact, request ids never. `needed` is the run's planned
+ * batch requests up front, 1 before each new batch.
  */
 export async function assertConversationAdmissionHeadroom(engine: BrainEngine, authority: MaintenanceAuthority, needed = 1): Promise<void> {
   const limits = await readJournalLimits(engine);
   const [counter] = await engine.executeRaw<{ outstanding_count: number | string; terminal_bytes: number | string; lifetime_ids: number | string }>(
     'SELECT outstanding_count, terminal_bytes, lifetime_ids FROM persistence_counters WHERE key=$1', [principalKey(authority.writer.principal)]);
   const sourceId = authority.writer.sourceId;
-  const share = (limit: number) => Math.max(1, Math.floor(limit * OUTSTANDING_ADMISSION_SHARE));
   const outstanding = Number(counter?.outstanding_count ?? 0);
-  if (outstanding >= share(limits.principalOutstanding)) {
+  if (outstanding >= Math.max(1, Math.floor(limits.principalOutstanding * OUTSTANDING_ADMISSION_SHARE))) {
     throw catalogueError('maintenance_backpressure',
       `Conversation fact extraction stopped admitting: ${outstanding} of this writer's ${limits.principalOutstanding} outstanding requests are still pending.`,
       `Let the pending requests settle (gbrain sources writer status --source ${sourceId} --json shows them; a resident gbrain serve or the next CLI run publishes them), then rerun the same command. Pages already published keep their facts.`);
   }
-  const reservation = Math.max(16_384, jsonBytes(authority.writer) + 8192);
-  const cumulative = [
-    { resource: 'reserved receipt bytes', key: 'persistence.limits.principal_terminal_bytes', used: Number(counter?.terminal_bytes ?? 0),
-      limit: limits.principalTerminalBytes, per: reservation,
-      why: 'each request reserves its receipt for the retention window (persistence.receipt_retention_days), and the reservation frees only when receipts compact' },
-    { resource: 'permanent request ids', key: 'persistence.limits.principal_lifetime_ids', used: Number(counter?.lifetime_ids ?? 0),
-      limit: limits.principalLifetimeIds, per: 1, why: 'request ids are never reused or freed' },
-  ];
-  for (const r of cumulative) {
-    const ceiling = share(r.limit);
+  // #6696 (A5): the cumulative caps follow the background pause, with the host-only, resource-specific fix: waiting frees no request id.
+  const pause = await readBackgroundPauseShare(engine);
+  const reservation = receiptReservation({ authority: authority.writer });
+  const key = principalKey(authority.writer.principal);
+  for (const r of [
+    { resource: 'terminal_bytes' as const, setting: 'principalTerminalBytes' as const, used: Number(counter?.terminal_bytes ?? 0), per: reservation },
+    { resource: 'lifetime_ids' as const, setting: 'principalLifetimeIds' as const, used: Number(counter?.lifetime_ids ?? 0), per: 1 },
+  ]) {
+    const limit = limits[r.setting];
+    const ceiling = Math.floor(limit * pause);
     if (r.used + needed * r.per <= ceiling) continue;
     const room = Math.max(0, Math.floor((ceiling - r.used) / r.per)) * batchCaps.factPages;
-    const planned = needed > 1 ? `${needed} planned` : 'the next';
-    throw catalogueError('maintenance_backpressure',
-      `Conversation fact extraction stopped before admitting ${planned} request(s): this writer's ${r.resource} would pass 80% of its limit (${r.used} used of ${r.limit}).`,
-      `The last 20% stays free for this CLI writer's other writes; ${r.why}. ${room > 0 ? `Run a smaller batch that fits: gbrain extract-conversation-facts --source-id ${sourceId} --limit ${room}. ` : ''}`
-        + `Check the writer with gbrain sources writer status --source ${sourceId} --json; raising ${r.key} (gbrain config set ${r.key} <n>) is the user's call.`);
+    throw backgroundPaused(key, r.resource, r.used, limit, pause, journalLimitKey(r.setting),
+      await oneYearCapacity(engine, key, r.resource === 'lifetime_ids' ? 'LifetimeIds' : 'TerminalBytes', r.used, limit), {
+        what: `Conversation fact extraction stopped before admitting ${needed > 1 ? `${needed} planned` : 'the next'} request(s)`,
+        alternative: room > 0 ? `A smaller batch fits: gbrain extract-conversation-facts --source-id ${authority.writer.sourceId} --limit ${room}.` : undefined });
   }
 }
 
@@ -756,5 +757,5 @@ export async function flushManagedBatch(state: ManagedRunState, opts: { afterErr
 /** Managed admission backpressure and exhausted request ids stop the whole run, not one page. */
 export function stopsRun(err: unknown): boolean {
   return (!!err && typeof err === 'object' && RUN_STOPPING.has(err))
-    || (err instanceof OperationError && (err.code === 'maintenance_backpressure' || err.code === 'queue_capacity'));
+    || (err instanceof OperationError && (err.code === 'maintenance_backpressure' || err.code === 'queue_capacity' || err.code === 'write_quota_exhausted' || err.code === 'write_capacity_backpressure'));
 }

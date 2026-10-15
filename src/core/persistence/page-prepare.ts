@@ -1,4 +1,5 @@
 import { isEmbedSkipped } from '../embed-skip.ts';
+import { sizeStateField } from '../page-embedding-budget.ts';
 import { enterClaimStep, type ClaimPhaseClock } from './claim-phase.ts';
 import { boundedReads } from './bounded-reads.ts';
 import { isQuarantined, quarantineOutcome } from '../quarantine.ts';
@@ -11,13 +12,15 @@ import type { GBrainConfig } from '../config.ts';
 import type { Page, PageVersion } from '../types.ts';
 import { importFromContent, verifyPageReadable, type ParsedPage } from '../import-file.ts';
 import { comparableFrontmatter, frontmatterHoldMessageWithoutKeys, parseMarkdown, resolveParsedSubtype, serializePageToMarkdown, resolveSourceLocalFilePath, type ParseOpts } from '../markdown.ts';
+import { assertLargePageReplacement } from './large-page-guard.ts';
 import { OperationError, opError } from '../ops/contract.ts';
+import { CANONICAL_FILE_MISSING } from './publication-failure.ts';
 import { readFix } from '../ops/op-fix.ts';
 import { isOpPageSlug } from '../ops/context.ts';
 import { shellQuote, type Action } from '../agent-output.ts';
 import type { RegistryCode } from '../error-registry.ts';
 import { pageIdentityError } from './page-identity.ts';
-import { contentRefusalError } from '../import-screen.ts';
+import { contentRefusalError, PAGE_OVER_LIMIT_SUGGESTION } from '../import-screen.ts';
 import { ContentSanityBlockError } from '../content-sanity.ts';
 import { assertPageRevision, type PageSnapshot } from '../page-state/types.ts';
 import { gitHoldFix, readGitHold } from './sync-holds.ts';
@@ -63,6 +66,7 @@ import { withTrustKeep } from './context.ts';
 import { isFenceEditWrite, pageGateTrust, pageWriteTrust, recordAgentPageLowering, stampPageTrustMarker, storedPageTier } from '../trust/page-write.ts';
 import { suppliedTrustMarkerView } from '../trust/channel.ts';
 import { gateField, gateInput } from '../trust/gate-outcomes.ts';
+import { PUSH_SCAN_MAX_FILE_BYTES } from '../page-size-policy.ts';
 
 
 const ownerStatusFix = (sourceId: string): Action => readFix(`Shows source ${sourceId}'s canonical owner with its pending, failed and recovering requests, read-only.`,
@@ -126,7 +130,7 @@ function isNeverFiledDerivedPage(slug: string, page: { source_path?: string | nu
  * A live page whose canonical file is absent publishes to the database only
  * when its slug is a declared db_only path or a never-filed derive-phase page.
  */
-export function publishesDatabaseOnly(root: string, slug: string, snapshot: PageSnapshot | null): boolean {
+export function publishesDatabaseOnly(root: string, slug: string, snapshot: { page: Pick<PageSnapshot['page'], 'deleted_at' | 'source_path' | 'source_uri'> } | null): boolean {
   if (!snapshot || snapshot.page.deleted_at) return false;
   return isSourceDbOnlySlug(root, slug, 'refuse') || isNeverFiledDerivedPage(slug, snapshot.page);
 }
@@ -161,6 +165,9 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
     /** #6517: a delete whose file another live page of the source records owns no file; the census target and claimants are reported. */
     sharedOrigin?: { onShared: (shared: SharedOrigin) => void } } = {}): Promise<PreparedMutation['file']> {
   if (!row.worktree_id) return undefined;
+  // A canonical file over the pre-push secret-scan cap would block every later push of the brain repo.
+  if (content !== null && Buffer.byteLength(content, 'utf-8') > PUSH_SCAN_MAX_FILE_BYTES) throw opError('request_too_large', 'The canonical file would exceed the pre-push secret-scan cap.',
+    `Nothing was written. The rendered file of ${row.slug} is over ${PUSH_SCAN_MAX_FILE_BYTES} bytes, which the pre-push secret scan cannot scan, so it would block every push of source ${row.source_id}. Keep the page under the 24 MiB page ceiling (docs/guides/memory-boundaries.md#large-pages).`);
   // #6212: a legacy slug (admitted only to delete or restore its existing row) never owns a file: its recorded
   // source_uri or source_path may name the file of another page, such as the one sync now slugs it to.
   if (!isOpPageSlug(row.slug)) return undefined;
@@ -210,8 +217,9 @@ export async function prepareFileTarget(engine: BrainEngine, row: Pick<WriteRequ
     // missing still refuses below.
     if (publishesDatabaseOnly(root, row.slug, snapshot)) return undefined;
     if (options.deleting === true && content === null && !snapshot.page.source_path && !capturedPath) return undefined;
-    throw new OperationError('source_changed', 'The canonical file was removed outside coordinated publication.',
-      'Import the local deletion or recover the canonical file before editing this page.');
+    // #6696 (A12): tagged, so a producer can refuse this before admission and the receipt says which refusal it was.
+    throw opError('source_changed', 'The canonical file was removed outside coordinated publication.',
+      'Import the local deletion or recover the canonical file before editing this page.', { detail: CANONICAL_FILE_MISSING });
   }
   // A normal edit may replace only the bytes represented by its read snapshot.
   // Unknown local edits require explicit import/recovery, even for force writes.
@@ -401,10 +409,11 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
   if ((snapshot?.page.id ?? null) !== row.page_id) throw pageIdentityError(snapshot != null || row.page_id === null, 'The accepted page identity changed.');
   const observedRevision = snapshot?.revision ?? null;
   const activePack = pack?.manifest;
-  if (row.operation === 'put_page' && p.allow_empty !== true && snapshot && !snapshot.page.deleted_at
-    && typeof p.content === 'string' && `${snapshot.page.compiled_truth}\n${snapshot.page.timeline ?? ''}`.trim()) {
+  if (row.operation === 'put_page' && snapshot && !snapshot.page.deleted_at && typeof p.content === 'string'
+    && `${snapshot.page.compiled_truth}\n${snapshot.page.timeline ?? ''}`.trim()) {
     const incoming = parseMarkdown(p.content, row.slug, { activePack });
-    if (!`${incoming.compiled_truth}\n${incoming.timeline ?? ''}`.trim()) {
+    if (!preparedIntent && row.authority.remote) assertLargePageReplacement(row.slug, row.source_id, p, snapshot, incoming);
+    if (p.allow_empty !== true && !`${incoming.compiled_truth}\n${incoming.timeline ?? ''}`.trim()) {
       throw new OperationError('invalid_params', `Refusing to overwrite existing non-empty page '${row.slug}' with empty content. Use capture --file PATH --slug SLUG for file input; set allow_empty:true to intentionally clear it.`,
         'Use capture --file PATH --slug SLUG for file input, or pass allow_empty:true with the expected revision to intentionally clear it.');
     }
@@ -526,7 +535,7 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
     // A remote caller's refusal names the line, never a key: keys can be private, and the receipt keeps the message.
     const refusal = result.refusal && row.authority.remote && result.refusal.code === 'invalid_frontmatter'
       ? { ...result.refusal, key: undefined, message: frontmatterHoldMessageWithoutKeys(result.refusal.message) } : result.refusal;
-    if (refusal?.code === 'file_too_large') throw contentRefusalError(refusal, 'Split the content into smaller pages, then submit each with its own request_id.', { legacy_error: 'request_too_large' });
+    if (refusal?.code === 'file_too_large') throw contentRefusalError(refusal, PAGE_OVER_LIMIT_SUGGESTION, { legacy_error: 'request_too_large' });
     if (refusal?.code === 'invalid_fence') throw contentRefusalError(refusal, `Page ${row.slug} was not written. Fix ${fenceWhere(refusal.fence)} as the message says (fence_issues lists every row and column; use the allowed values), `
       + 'or write facts with remember and takes with takes_add instead of a hand-built table, then submit the corrected content with a new request_id.', { legacy_error: 'invalid_params' });
     if (refusal) throw contentRefusalError(refusal, `Correct ${refusal.line !== undefined ? `frontmatter line ${refusal.line}${refusal.key ? ` (key "${refusal.key}")` : ''}` : 'the frontmatter'}: one line per key with its whole value quoted, then submit the corrected content with a new request_id.`,
@@ -641,10 +650,13 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
     }
     const coreUsage = core?.usage();
     const gate = noop ? undefined : gateField(ready.result.gate, `p:${row.source_id}/${row.slug}`, null);
+    // #6722: a large or embed_skip page says what this write left its embedding in.
+    const sizeState = noop ? {} : await sizeStateField(tx, row.source_id, row.slug, ready.parsedPage);
     return { ...advisories, ...(autoLinks ? {auto_links:autoLinks} : {}), ...(coreUsage ? { core: coreUsage } : {}),
       ...(removedTimeline ? { timeline_rows_removed: timelineRowsRemovedAdvisory(row, removedTimeline) } : {}),
       status: noop ? 'skipped' : row.operation === 'restore_page' ? 'restored' : row.operation === 'revert_version' ? 'reverted' : 'created_or_updated',
       slug: row.slug, source_id: row.source_id, chunks: ready.result.chunks, noop,
+      ...sizeState,
       ...(ready.result.chunks === 0 ? {chunk_skip_reason: noop ? 'write_skipped'
         : isEmbedSkipped(ready.parsedPage.frontmatter) || isQuarantined(ready.parsedPage.frontmatter) ? 'embed_skip' : 'empty_body'} : {}),
       // #6259: say the gate hid the page, not only why it has no chunks.

@@ -28,13 +28,16 @@ import {
   ensureIpcSecretForConfig,
   type IpcHandlers,
   type IpcServerOpts,
+  type TurnContextRequest,
 } from '../core/context/resolve-ipc.ts';
 import { resolveEntitiesToPointers, logDeliveredReflexPointers } from '../core/context/retrieval-reflex.ts';
 import { lexicalArmsEnabled } from '../core/context/reflex.ts';
 import { VOLUNTEER_MAX_PAGES_CAP } from '../core/context/volunteer.ts';
-import { assembleTurnContext } from '../core/context/turn-context.ts';
+import { assembleTurnContext, TURN_CONTEXT_DEFAULT_MAX_BYTES, type TurnContextResult } from '../core/context/turn-context.ts';
+import { attachBrief, briefEnabled, BRIEF_MAX_BYTES, recordBriefDelivered, turnBrief, TURN_BRIEF_CUTOFF_MS, withBriefDeadline } from '../core/context/proactive-brief.ts';
+import { proactiveEligibility } from '../core/eligibility/registry.ts';
 import { makeContextPackIpcHandler } from './context-pack-handler.ts';
-import { logTurnContextDeliveryFireAndForget } from '../core/context/volunteer-events.ts';
+import { logBriefDeliveryFireAndForget, logTurnContextDeliveryFireAndForget } from '../core/context/volunteer-events.ts';
 import { persistenceSocketPathForConfig, startPersistenceIpcServer, type PersistenceIpcProvider, type PersistenceIpcBinding } from '../core/persistence/ipc.ts';
 import { residentPersistenceConfig } from '../core/persistence/local-client.ts';
 
@@ -50,6 +53,45 @@ export interface ResolveIpcBinding {
 }
 
 const NULL_BINDING: ResolveIpcBinding = { server: null, socketPath: null, close: () => {} };
+
+/**
+ * The turn_context assembly the serve answers with (minus the pressure gate).
+ * Wave 5 D5 proactive brief (default off): the legacy block is assembled
+ * first and stands on its own; when `context.proactive_brief` is on, the
+ * brief runs in what is left of a request-start cutoff (its queries stop once
+ * it passes), inside a byte reservation taken from the legacy block, and
+ * leads the text. Off, this is the legacy assembly exactly. Always assembles
+ * against the serve's OWN registered source [CX2-10].
+ */
+export async function turnContextWithBrief(engine: BrainEngine, sourceId: string, req: TurnContextRequest): Promise<TurnContextResult> {
+  const clock = { now: Date.now(), stopAt: Date.now() + TURN_BRIEF_CUTOFF_MS };
+  const briefOn = await briefEnabled(engine);
+  const base = await assembleTurnContext(engine, {
+    sourceId,
+    window: req.window ?? [],
+    priorContextText: req.priorContextText,
+    sessionId: req.sessionId,
+    maxBytes: briefOn ? Math.max(1024, (req.maxBytes ?? TURN_CONTEXT_DEFAULT_MAX_BYTES) - BRIEF_MAX_BYTES - 2) : req.maxBytes,
+    // Per-request config read: `gbrain serve` is long-running, and the
+    // lexical-arms switch reverts a false-fire regression on the NEXT turn
+    // (adversarial F3).
+    lexicalArms: lexicalArmsEnabled(loadConfig()),
+  });
+  const last = req.window?.at(-1);
+  const prompt = last?.role === 'user' ? last.text : '';
+  if (!briefOn || !prompt.trim()) return base;
+  const brief = await withBriefDeadline(proactiveEligibility({ engine }, 'hook.user_prompt').then((eligibility) => turnBrief(engine, {
+    sourceId, prompt, sessionId: req.sessionId, priorContextText: req.priorContextText, eligibility, clock,
+  })), clock);
+  return attachBrief(base, brief);
+}
+
+/** A delivered block's brief: record its ids for the session, then log them. No-op without a brief. */
+export function briefDelivered(engine: BrainEngine, sourceId: string, result: TurnContextResult, sessionId: string | undefined): void {
+  if (!result.brief) return;
+  recordBriefDelivered(sourceId, sessionId, result.brief.items.map((i) => i.id));
+  logBriefDeliveryFireAndForget(engine, result.brief, sessionId);
+}
 
 /**
  * Bind the resolve/turn_context/context_pack (+ delegated sync/sweep) IPC
@@ -198,16 +240,7 @@ export async function bindResolveIpcForServe(
       // source — cross-source requests are rejected in the IPC layer via
       // boundSourceId below, and the handler never honors a caller source.
       turn_context: async (req) => ({
-        ...await assembleTurnContext(engine, {
-          sourceId: defaultSource,
-          window: req.window ?? [],
-          priorContextText: req.priorContextText,
-          sessionId: req.sessionId,
-          maxBytes: req.maxBytes,
-          // Per-request config read — same next-turn-revert rationale as
-          // the resolve handler above (adversarial F3).
-          lexicalArms: lexicalArmsEnabled(loadConfig()),
-        }),
+        ...await turnContextWithBrief(engine, defaultSource, req),
         // Context-pressure gate for the harness hook (pressure.ts); a surface without remember never warns.
         pressure: await readPressureGate(engine, typeof opts.rememberCallable === 'function' ? opts.rememberCallable() : opts.rememberCallable ?? true),
       }),
@@ -242,8 +275,13 @@ export async function bindResolveIpcForServe(
       // in context_volunteer_events under the request's channel. Body
       // lives in volunteer-events.ts (logTurnContextDeliveryFireAndForget)
       // so the shipped wiring is unit-testable.
-      onTurnContextDelivered: (result, req) =>
-        logTurnContextDeliveryFireAndForget(engine, result, req),
+      // Wave 5 D5: a delivered brief (UserPromptSubmit or SessionStart) is
+      // ledgered for repeat suppression and logged under channel 'brief'.
+      onTurnContextDelivered: (result, req) => {
+        logTurnContextDeliveryFireAndForget(engine, result, req);
+        briefDelivered(engine, defaultSource, result, req.sessionId);
+      },
+      onContextPackDelivered: (result, req) => briefDelivered(engine, defaultSource, result, req.sessionId),
       boundSourceId: defaultSource,
       secret: ipcSecret,
     };

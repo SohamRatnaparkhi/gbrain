@@ -30,9 +30,8 @@ import { pageReadFilter } from './read-policy-sql.ts';
 import { currentTextProjectionFilter, safeChunksFilter, requiresSafeChunks } from './safe-chunks.ts';
 import { resolveExcludePrivatePages } from './private-visibility.ts';
 import { safeSplitIndex } from '../text-safe.ts';
-import { sanitizeRemoteBody } from '../remote-body.ts';
-import { credentialSafeProjection } from '../credential-projection.ts';
-import { loadFenceChunkOverlay, markFenceChunk, splitFenceOverlay, type FenceChunkOverlay } from '../eligibility/fence-overlay.ts';
+import { loadFenceChunkOverlay, type FenceChunkOverlay } from '../eligibility/fence-overlay.ts';
+import { DEFAULT_INLINE_BODY_BYTES, locateChunksByStoredSpans, projectPageText, TIMELINE_SEPARATOR } from '../page-window/document.ts';
 import { stripChunkHeader } from '../chunkers/code.ts';
 import { OperationError } from '../ops/contract.ts';
 import { blockDateHeaders, evidenceDateHeaderEnabled } from './evidence-date.ts';
@@ -384,8 +383,7 @@ function sliceToTokenCount(text: string, max: number, tokenizer: 'cl100k' | 'heu
 // Locating chunks in the sanitized body
 // ---------------------------------------------------------------------------
 
-/** Separator serializeMarkdown writes between compiled truth and timeline. */
-export const TIMELINE_SEPARATOR = '\n\n<!-- timeline -->\n\n';
+export { TIMELINE_SEPARATOR };
 
 /** Whitespace runs collapsed to one space, with a map back to original offsets. */
 function squeeze(text: string): { s: string; map: number[] } {
@@ -416,7 +414,7 @@ function squeeze(text: string): { s: string; map: number[] } {
  * match ignores whitespace differences; consecutive chunks overlap, so each
  * search starts just after the previous chunk's start. Unlocated chunks are absent.
  */
-export function locateChunks(text: string, chunks: Array<{ id: number; chunk_index: number; chunk_text: string }>): Array<{ id: number; chunk_index: number; start: number; end: number }> {
+export function locateChunks(text: string, chunks: Array<{ id: number; chunk_index: number; chunk_text: string }>, fold = true): Array<{ id: number; chunk_index: number; start: number; end: number }> {
   let body: ReturnType<typeof squeeze> | null = null;
   const out: Array<{ id: number; chunk_index: number; start: number; end: number }> = [];
   let from = 0;
@@ -430,6 +428,7 @@ export function locateChunks(text: string, chunks: Array<{ id: number; chunk_ind
       from = at + 1;
       continue;
     }
+    if (!fold) continue;
     body ??= squeeze(text);
     const needle = squeeze(exact).s;
     let lo = 0;
@@ -574,32 +573,24 @@ function fallbackBlock(hit: SearchResult, hits: SearchResult[], reason: string):
 }
 
 /**
- * The page text evidence is cut from: the complete stored body, sanitized
- * with the strict protected-body boundary BEFORE any slicing (Takes, non-world
- * and withdrawn Facts rows, malformed protected tails, materialized markers),
- * compiled truth and timeline each sanitized whole, run through the same
- * credential-safe projection the chunkers cut from (private-key spans become
- * newline-padded tokens), and joined the way serializeMarkdown joins them.
- * Frontmatter is not part of it.
+ * The page text evidence is cut from: the one projected page text every
+ * windowed read slices (page-window/document.ts): the complete stored body,
+ * sanitized with the strict protected-body boundary BEFORE any slicing (Takes,
+ * non-world and withdrawn Facts rows, malformed protected tails, materialized
+ * markers), compiled truth and timeline each sanitized whole, run through the
+ * same credential-safe projection the chunkers cut from, and joined the way
+ * serializeMarkdown joins them. Frontmatter is not part of it.
  */
 export function pageEvidenceText(page: { compiled_truth: string; timeline: string; fenceOverlay?: FenceChunkOverlay }, includeTimeline: boolean): { text: string; timelineAt: number } {
-  // #5575 ENG-1: the page's chunks were cut through its fence overlay; the document is too (held and purged rows
-  // out, rows below the page tier after the truth under their trust marker, the way the marked chunks hold them).
-  const ownTruth = splitFenceOverlay(page.compiled_truth ?? '', page.fenceOverlay);
-  const ownTimeline = splitFenceOverlay(page.timeline ?? '', page.fenceOverlay);
-  const truth = [credentialSafeProjection(sanitizeRemoteBody(ownTruth.main)), ...[...ownTruth.lowTier, ...(includeTimeline ? ownTimeline.lowTier : [])]
-    .map(({ tier, unconfirmed, body }) => markFenceChunk(tier, credentialSafeProjection(sanitizeRemoteBody(body)), unconfirmed))].join('\n\n');
-  const timeline = includeTimeline ? credentialSafeProjection(sanitizeRemoteBody(ownTimeline.main)) : '';
-  if (!timeline.trim()) return { text: truth, timelineAt: -1 };
-  return { text: truth + TIMELINE_SEPARATOR + timeline, timelineAt: truth.length + TIMELINE_SEPARATOR.length };
+  return projectPageText(page, includeTimeline);
 }
 
-function locateAnchor(doc: Doc, hit: SearchResult): Anchor {
+function locateAnchor(doc: Doc, hit: SearchResult, fold: boolean): Anchor {
   const byId = hit.chunk_id > 0 ? doc.spans.find(x => x.id === hit.chunk_id) : undefined;
   if (byId) return { chunk_id: hit.chunk_id, mapped: true, pieces: piecesOverlapping(doc, byId.start, byId.end), start: byId.start, end: byId.end, chunkIndex: byId.chunk_index };
   const text = hitPageText(hit).trim();
   if (text.length >= 16) {
-    const found = locateChunks(doc.text, [{ id: hit.chunk_id, chunk_index: hit.chunk_index, chunk_text: text }])[0];
+    const found = locateChunks(doc.text, [{ id: hit.chunk_id, chunk_index: hit.chunk_index, chunk_text: text }], fold)[0];
     if (found) {
       // A fenced_code chunk_index follows every prose chunk, so it says nothing
       // about position: the window grows from the prose chunk holding the fence,
@@ -657,19 +648,26 @@ function sectionCandidates(doc: Doc, anchors: Anchor[], conversation: boolean): 
   return set.size === 0 ? null : [...set].sort((x, y) => x - y);
 }
 
+/** Large pages: above this size hits are located by their stored spans only (no whole-text whitespace folding). */
+const SPAN_ONLY_LOCATE_BYTES = 1024 * 1024;
+/** fallback_reason when a 'page' (or auto) unit was cut to a window because the page is over the inline read size. */
+export const PAGE_OVER_INLINE_BYTES = 'page_over_inline_bytes';
+
 function planBlock(page: ChunkWindowPage, hits: SearchResult[], plan: EvidencePlan, includeTimeline: boolean): PlannedBlock {
   const best = hits[0];
   if (!page.sealed) return fallbackBlock(best, hits, 'unsealed_page');
   if (page.chunks.length === 0 && page.row_limited) return fallbackBlock(best, hits, 'row_limit');
   const { text, timelineAt } = pageEvidenceText(page, includeTimeline);
+  const textBytes = Buffer.byteLength(text, 'utf8');
   const truthChunks = page.chunks.filter(c => c.chunk_source === 'compiled_truth');
   const timelineChunks = page.chunks.filter(c => c.chunk_source === 'timeline');
-  const spans = [
+  // Large pages: above 1 MiB the text is never whitespace-folded whole; hits are anchored by their stored spans only.
+  const spans = textBytes > SPAN_ONLY_LOCATE_BYTES ? locateChunksByStoredSpans(text, timelineAt, page.chunks) : [
     ...locateChunks(timelineAt < 0 ? text : text.slice(0, timelineAt - TIMELINE_SEPARATOR.length), truthChunks),
     ...(timelineAt < 0 ? [] : locateChunks(text.slice(timelineAt), timelineChunks).map(sp => ({ ...sp, start: sp.start + timelineAt, end: sp.end + timelineAt }))),
   ];
   const doc = buildDoc(text, spans);
-  const anchors = hits.map(h => locateAnchor(doc, h));
+  const anchors = hits.map(h => locateAnchor(doc, h, textBytes <= SPAN_ONLY_LOCATE_BYTES));
   if (anchors.every(a => a.pieces.length === 0)) {
     return fallbackBlock(best, hits, page.row_limited ? 'row_limit' : page.chunks.length === 0 ? 'no_text_chunks' : 'anchor_not_located');
   }
@@ -679,6 +677,8 @@ function planBlock(page: ChunkWindowPage, hits: SearchResult[], plan: EvidencePl
   let unit: DeliveredUnit = plan.unit === 'auto' ? 'page' : plan.unit;
   let fallbackReason: string | undefined;
   let candidates: number[];
+  // Large pages (T18): a page over the inline read size is never delivered whole; it becomes the window around its hits.
+  if (unit === 'page' && textBytes > DEFAULT_INLINE_BODY_BYTES) { unit = 'window'; fallbackReason = PAGE_OVER_INLINE_BYTES; }
   if (unit === 'page') {
     candidates = doc.pieces.map((_, i) => i);
   } else if (unit === 'section') {
@@ -1163,7 +1163,7 @@ export async function deliverEvidence(
       truncated,
       ...(b.revision ? { revision: b.revision } : {}),
       ...(out.unmapped.length > 0 ? { unmapped_chunk_ids: out.unmapped } : {}),
-      ...(b.fallbackReason && b.unit === 'chunk' ? { fallback_reason: b.fallbackReason } : {}),
+      ...(b.fallbackReason && (b.unit === 'chunk' || b.fallbackReason === PAGE_OVER_INLINE_BYTES) ? { fallback_reason: b.fallbackReason } : {}),
       ...(b.reason ? { reason: b.reason } : {}),
     };
     return { ...b.hit, title: b.title, chunk_text: text, delivered };

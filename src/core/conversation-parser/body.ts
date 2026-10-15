@@ -1,8 +1,26 @@
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, resolve, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { Page } from '../types.ts';
 import { loadSourceRow } from '../contextual-retrieval-service.ts';
+import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
+
+/**
+ * The largest conversation parser input (UTF-8 bytes): the page ceiling plus
+ * 1 MiB of headroom (25 MiB today, the historical cap). Derived from
+ * PAGE_MAX_BYTES so it moves with the ceiling and never sits below it, so no
+ * page ingest accepts is skipped for size. A `raw_transcript` sidecar over it
+ * is never read.
+ */
+export const CONVERSATION_BODY_MAX_BYTES = PAGE_MAX_BYTES + 1024 ** 2;
+
+/** A `raw_transcript` sidecar over CONVERSATION_BODY_MAX_BYTES: refused from its size before any read. */
+export class ConversationBodyTooLargeError extends Error {
+  constructor(readonly bytes: number, readonly mtimeMs: number) {
+    super(`raw_transcript sidecar is ${bytes} bytes, over the ${CONVERSATION_BODY_MAX_BYTES}-byte conversation body cap; it was not read`);
+    this.name = 'ConversationBodyTooLargeError';
+  }
+}
 
 export function readSummaryBody(page: Page): string {
   const compiled = page.compiled_truth ?? '';
@@ -102,6 +120,7 @@ async function resolveTranscriptPath(
   return null;
 }
 
+/** The parser input: the `raw_transcript` sidecar when it resolves and is non-empty, else the summary body. Throws ConversationBodyTooLargeError for an oversized sidecar. */
 export async function readConversationBodyForParsing(
   engine: BrainEngine,
   page: Page,
@@ -110,6 +129,8 @@ export async function readConversationBodyForParsing(
   if (rawTranscript) {
     const resolved = await resolveTranscriptPath(engine, page, rawTranscript);
     if (resolved && existsSync(resolved)) {
+      const { size, mtimeMs } = statSync(resolved);
+      if (size > CONVERSATION_BODY_MAX_BYTES) throw new ConversationBodyTooLargeError(size, mtimeMs);
       const rawBody = readFileSync(resolved, 'utf8').trim();
       if (rawBody.length > 0) return rawBody;
     }

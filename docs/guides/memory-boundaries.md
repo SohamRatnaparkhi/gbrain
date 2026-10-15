@@ -37,7 +37,8 @@ owner runs a [purge](#purge) on the brain host. See [ambient writeback](ambient-
 Saving text or a fact never waits on a generative model: a write is
 acknowledged and keyword-queryable without one. Embeddings are the configured
 feature (`remember` embeds before saving to detect near-duplicates; pages embed
-just after the save). With default settings each saved page of an
+just after the save, and a page over 1 MiB embeds later through the stale
+sweep: see [large pages](#large-pages)). With default settings each saved page of an
 extraction-eligible type (note, meeting, email and similar) also gets one facts
 extraction call after it is saved; it runs as a queued job, is attributed to the
 write that caused it, and stops with `gbrain config set facts.extraction_enabled
@@ -70,6 +71,137 @@ A timeline entry has no update or remove operation: `add_timeline_entry`
 returns the rendered bullet, and editing or deleting that bullet in the page's
 Timeline section through `edit_page` (with `expected_revision`) refreshes or
 removes its row, because the page is the system of record for timeline rows.
+
+<a id="large-pages"></a>
+## Large pages
+
+**Say to your agent:** *"Import this long conversation export as one page and
+make it searchable. Tell me what embedding it will cost before you spend
+anything."* The agent imports the file on the brain host with
+`gbrain import <file>`, checks that keyword search finds it, and asks before
+running `gbrain embed`.
+
+**Say to your agent:** *"I upgraded gbrain. Which of my big pages couldn't be
+found before, and what would it cost to embed them now?"* The agent runs
+`gbrain reindex --oversized --dry-run --json` and `gbrain doctor --json`, then
+asks before `gbrain embed --held --max-usd <N>`.
+
+A page stays one page whatever its size: one slug, one title, one set of
+links. Size no longer decides whether search can find it. Every Markdown page
+up to 24 MiB (25,165,824 bytes) is stored, chunked and keyword-indexed when it
+is written, on every engine. Don't split a page by hand to make it searchable.
+
+| Page body | Keyword search | Meaning (vector) search |
+| --- | --- | --- |
+| Up to 1 MiB | right after the write | right after the write |
+| Over 1 MiB, up to 24 MiB (a *large* page) | right after the write | after the write commits, when the stale sweep embeds it (`gbrain embed --stale`, sync's embed pass, autopilot) |
+| Over 24 MiB | refused with [`file_too_large`](write-refusals.md#file_too_large); nothing is stored | — |
+
+Code files keep a lower limit; see [limits per entry point](#large-page-limits).
+
+A large page commits without vectors, so a big write never waits on the
+embedding provider. It also differs from a small page in three ways. Its
+chunks use the free title context tier, never a per-chunk model synopsis.
+Before it is embedded, the junk check samples its head, middle and tail
+instead of reading the whole body. And gbrain keeps a bounded number of
+version snapshots of it, so a page appended to every day doesn't store its
+whole body again in history on every write.
+
+An operator who set a lower `content_sanity.bytes_block` (the
+`GBRAIN_PAGE_BLOCK_BYTES` env var, the config file, or the database config)
+stops embedding above that value: such a page is stored with an `embed_skip`
+marker and gets no vectors, but it is still chunked, so keyword search finds
+it. The same holds for any page with an `embed_skip` marker. The default is
+the 24 MiB ceiling, so nothing is skipped for size unless someone lowered it.
+
+**What a write says about size.** `put_page`, `remember` and sync receipts
+carry the same field for a large or `embed_skip` page, so the writer learns on
+the write itself, without reading the sync log. `size_state` on a page receipt
+(and on `remember` when it appended to such a page) is
+`{ embedding, reason, bytes }`; a sync receipt has `size_states`:
+`{ total, pages }` with the first 50 pages, each with its `slug`, `path` (a
+managed sync) and the same fields, and the sync output prints a line per page.
+An ordinary page carries no field.
+
+| `embedding` | `reason` | What happened |
+| --- | --- | --- |
+| `deferred` | `large_page` | Over 1 MiB: committed with chunks and no vectors; the embedding sweep embeds it after the commit, under `embed.max_usd_per_page`. |
+| `partial` | `spend_cap` | The per-page cap stopped embedding; the rest stays keyword-only. |
+| `held` | e.g. `upgrade_backfill` | Embedding waits for the user's approval of the previewed cost (`gbrain embed --held`). |
+| `skipped` | `oversized` | Over the operator's `bytes_block`: chunked and keyword-searchable, never embedded. |
+| `skipped` | `operator_marker` | Another `embed_skip` marker: chunked and keyword-searchable, never embedded. |
+
+A body over the 24 MiB ceiling has no receipt: the write is refused as
+`request_too_large`.
+
+<a id="large-page-limits"></a>
+### Limits per entry point
+
+The page ceiling applies everywhere, but some transports carry less. When one
+of them refuses a page under 24 MiB, send the page by file instead: nothing is
+wrong with the page.
+
+| Entry point | Limit | What to do above it today |
+| --- | --- | --- |
+| Markdown import and sync (`gbrain import`, `gbrain sync`, the managed sync blob read) | 24 MiB | — |
+| CLI stdin (`gbrain put`, `gbrain capture --stdin`) | 24 MiB (was 5 MB) | — |
+| MCP stdio (local agents, `gbrain serve`) | 64 MiB per JSON-RPC message (the MCP SDK default of 10 MiB is raised), so a JSON-escaped page at the ceiling fits | — |
+| MCP over HTTP (`gbrain serve --http`) | 4 MiB request body (the MCP SDK default) | the same: sync or the CLI on the brain host (chunked uploads arrive in a later release) |
+| Legacy HTTP transport | 1 MiB (`GBRAIN_HTTP_MAX_BODY_BYTES`) | the same |
+| `put_pages` batch | 8 MiB per batch | send large pages one per `put_page`, or by file |
+| Persistence journal | 64 MiB of outstanding JSON-escaped write intent per principal (was 32 MiB), 256 MiB per brain | nothing: a second large write waits for the first |
+| Local persistence socket (IPC) | 32 MiB per frame, JSON-escaped | nothing for ordinary text; only a pathological page (mostly quotes or backslashes) reaches it below the ceiling |
+| Pre-push secret scan | 25 MiB per file; gbrain never writes a canonical file over it | — |
+| GitHub | warns at 50 MB, rejects at 100 MB | — |
+| Export | aborts on a page over 32 MiB, which the 24 MiB ceiling makes unreachable | — |
+| Company-brain inspection | 5 MB per file | unchanged |
+| Transcript ingest input (Claude Code `.jsonl`) | 10 MiB by default, 50 MiB hard cap | unchanged |
+| Code files | 5 MB | unchanged |
+
+**Reading a large page.** Large reads come back in windows, not as one
+response, because agent transports and harness result caps can't carry tens of
+megabytes. The [`get_page` reference](../mcp/TOOL_REFERENCE.md#get_page)
+describes how to read the next window.
+
+**Cost.** Chunking and keyword indexing run locally and cost nothing.
+Embedding a large page costs about $0.15 per 10 MB at the default embedding
+model, so a page at the 24 MiB ceiling costs about $0.40. Each page has a paid
+spend cap, `embed.max_usd_per_page` (default $2), covering its embedding at
+every paid entry point (the stale sweep, `gbrain embed`, the post-write
+embedding job). A large page uses the free title context tier, never paid
+per-chunk synopses; conversation facts keep their own 25 MiB input bound and
+are not yet metered by this cap. When several caps apply,
+the lowest wins: the per-page cap, the run's consent cap (`--max-usd`),
+`embed.backfill_max_usd` and `embed.backfill_max_usd_per_source_24h`. A page
+over its cap is still keyword-searchable, and its newest chunks are embedded
+first, up to the cap. Doctor's `partial_embedding` check names each such page
+with the exact fix, `gbrain embed --slugs <slug> --max-usd <N>`; raising a cap
+is the user's call.
+
+<a id="large-pages-upgrade"></a>
+**After upgrading.** Older releases stored a page over 500 KB with an
+`embed_skip` marker (reason `oversized`) and no chunks. `gbrain upgrade` (its
+`gbrain post-upgrade` step) re-chunks and keyword-indexes those pages itself
+for up to two minutes, on the CPU, on keyless brains too, and prints a receipt;
+`gbrain reindex --oversized` does the rest. The backfill is idempotent and
+resumes where it stopped. It removes only gate-written markers whose reason is
+`oversized`, and the matching `content_flag: oversized`; a page above the
+operator's effective `bytes_block` keeps both and is re-chunked for keyword
+search with no vectors. The backfill never embeds.
+Backfilled pages over 1 MiB are held for consent; the post-upgrade notice and
+doctor's `partial_embedding` check show how many are held and what embedding
+them would cost. Pages between 500 KB and 1 MiB cost a cent or two each and
+embed through the normal sweep under the existing caps.
+
+```bash
+gbrain reindex --oversized --dry-run --json      # preview the backfill: free, no provider calls
+gbrain reindex --oversized --source <id>         # run it now for one source
+gbrain embed --held --max-usd 2                  # embed every held page, capped at $2 (paid)
+gbrain embed --slugs <slug> --max-usd 1          # embed one page, capped at $1 (paid)
+gbrain search "<a phrase from deep in the page>" # keyword search finds it before any embedding
+gbrain doctor --only partial_embedding --json    # pages embedded only up to their cap
+gbrain config set embed.max_usd_per_page 5       # raise the per-page cap (ask the user first)
+```
 
 ## Where text goes
 

@@ -187,6 +187,7 @@ const SWEEP: Record<string, Row> = {
   get_tags: { args: { slug: 'notes/n1' } },
   list_link_sources: { args: {} },
   get_brain_identity: { args: {} },
+  get_brain_health: { args: {} },
   list_skills: { skip: 'bundled skills catalog from the install tree (throws outside an installed skills dir)' },
   join_brain: { skip: 'shared-skills enrollment needs an explicit member grant; returns membership ids' },
   leave_brain: { skip: 'shared-skills membership op; returns membership ids' },

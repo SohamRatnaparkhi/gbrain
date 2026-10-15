@@ -48,8 +48,9 @@ import { curatedFlagError } from './help/validate.ts';
 import { cliCommandOf, exitCliError, exitOnRepairFailed, unknownFlagError, usageError, writeCliError, writeCliNotice, writeFatalCliError } from './cli-error.ts';
 import type { Notice } from '../core/agent-output.ts';
 import { opError, opOwnsSource } from '../core/ops/contract.ts';
+import { PAGE_MAX_BYTES } from '../core/page-size-policy.ts';
 import { opParamValue } from './op-param-values.ts';
-import { serializeMarkdown } from '../core/markdown.ts';
+import { formatGetPage, readWholePageMarkdown, remoteErrorCode, wantsWholePage } from './page-render.ts';
 import { parseGlobalFlags, setCliOptions, getCliOptions } from '../core/cli-options.ts';
 import { runCliPreflight } from '../core/cli-preflight.ts';
 import { isBooleanLiteral, isKnownOpFlag } from '../core/op-flag-tokens.ts';
@@ -75,7 +76,7 @@ import {
   type CliDispatchContext,
 } from './command-table.ts';
 import { formatRememberResult } from './remember-format.ts';
-import { applyCliOpNotices, captureOpNotice } from './op-notices.ts';
+import { applyCliOpNotices, captureCapacityNotices, captureOpNotice } from './op-notices.ts';
 
 // db-availability loop: best-effort brain-id for the GBRAIN_DB_ACCESS marker,
 // so a MOUNT's DB failure reads as `brain=<id>` instead of masquerading as a
@@ -688,6 +689,7 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
       }
     } else {
       rawResult = await op.handler(ctx, params);
+      if (op.mutating) await captureCapacityNotices(engine); // #6696 (A4)
     }
     // ENG-2 (renderer parity by data shape): JSON-round-trip the local-engine
     // path's return value so renderers see the same shape they'd see on the
@@ -793,7 +795,13 @@ async function runThinClientRouted(
       timeoutMs,
       signal: sigintController.signal,
       ...(op.mutating ? { writeWaitMs: currentCliWriteWait().waitMs } : {}),
+    }).catch(async (e: unknown) => { // large pages: a page too big for one response is paged to its end, verified, then printed
+      if (op.name !== 'get_page' || remoteErrorCode(e) !== 'page_too_large_for_inline' || !wantsWholePage(params)) throw e;
+      const paged = await readWholePageMarkdown(async p => unpackToolResult(await callRemoteTool(cfg, 'get_page', p, { timeoutMs, signal: sigintController.signal })), params);
+      await writeStdoutFinal(params.json === true ? JSON.stringify({ slug: params.slug, revision: paged.revision, content: paged.markdown, windows: paged.windows }) + '\n' : paged.markdown);
+      return null;
     });
+    if (raw === null) return;
     // T15/FOV-1: lift the server's retrieval meta off the envelope before
     // unpacking (old servers lack _meta — capture is simply skipped).
     const envelopeMeta = extractResponseMeta(raw);
@@ -1156,7 +1164,7 @@ export async function applyStdinParam(
   params: Record<string, unknown>,
 ): Promise<void> {
   // Branch shape (stdin hint + missing param + `!process.stdin.isTTY` gate +
-  // 5MB cap) is pinned by the R4 regression test for PR #1325's Windows fix
+  // page-ceiling cap) is pinned by the R4 regression test for PR #1325's Windows fix
   // (test/cycle/regression-pr-wave-r1-r2-r4.test.ts) — keep the spelling.
   if (op.cliHints?.stdin && !params[op.cliHints.stdin] && !process.stdin.isTTY) {
     const content = await readStdinBounded();
@@ -1167,9 +1175,9 @@ export async function applyStdinParam(
     // empty write; leaving the param unset makes the required-param usage
     // error fire instead (same fail-fast as the #3513 timeout path).
     if (content.trim() === '') return;
-    const MAX_STDIN = 5_000_000; // 5MB
+    const MAX_STDIN = PAGE_MAX_BYTES; // the 24 MiB page ceiling
     if (Buffer.byteLength(content, 'utf-8') > MAX_STDIN) {
-      exitCliError(opError('payload_too_large', `stdin content exceeds ${MAX_STDIN} bytes.`, 'Split the content into smaller inputs.'), op.cliHints?.name ?? op.name);
+      exitCliError(opError('payload_too_large', `stdin content exceeds ${MAX_STDIN} bytes (the 24 MiB page ceiling).`, 'Nothing was written. A page larger than the ceiling cannot be stored in this version; see docs/guides/memory-boundaries.md#large-pages.'), op.cliHints?.name ?? op.name);
     }
     params[op.cliHints.stdin] = content;
   }
@@ -1179,7 +1187,7 @@ export async function applyStdinParam(
  * Legacy-signature shim over interaction.ts readStdinBounded (A5): the full
  * stdin content, '' for a readable-but-empty stdin, or null for anything else
  * (first-byte or inactivity timeout, stream error, closed fd). No byte cap
- * here: applyStdinParam keeps its own 5MB check and message.
+ * here: applyStdinParam keeps its own page-ceiling check and message.
  */
 export async function readStdinBounded(): Promise<string | null> {
   const r = await readStdinPayload({ maxBytes: Infinity });
@@ -1514,7 +1522,7 @@ export async function makeContext(engine: BrainEngine, params: Record<string, un
     dryRun: (params.dry_run as boolean) || false,
     // Local CLI invocation — the user owns the machine; do not apply remote-caller
     // confinement (e.g., cwd-locked file_upload).
-    remote: false,
+    remote: false, admissionOrigin: 'interactive', // #6696 (A5): the user's own CLI writes
     cliOpts: getCliOptions(),
     writeWaitMs: currentCliWriteWait().waitMs, // #5232
     // v0.34 D4: sourceId is REQUIRED at the type level. Fall back to 'default'
@@ -1631,15 +1639,7 @@ export function formatResult(
       if (!pages.length) return 'Nothing volunteered (no entity cleared the confidence gate).\n';
       return pages.map((p) => formatVolunteeredPage(p)).join('\n') + '\n';
     }
-    case 'get_page': {
-      const r = result as any;
-      if (r.error === 'ambiguous_slug') {
-        return `Ambiguous slug. Did you mean:\n${r.candidates.map((c: string) => `  ${c}`).join('\n')}\n`;
-      }
-      return serializeMarkdown(r.frontmatter || {}, r.compiled_truth || '', r.timeline || '', {
-        type: r.type, title: r.title, tags: r.tags || [],
-      });
-    }
+    case 'get_page': return formatGetPage(result as Record<string, any>);
     case 'list_pages': {
       const pages = result as any[];
       if (pages.length === 0) return 'No pages found.\n';
@@ -1767,9 +1767,9 @@ export function formatResult(
       const versions = result as any[];
       if (versions.length === 0) return 'No versions.\n';
       return versions.map(v => {
-        // Only elide when something was actually dropped — an unconditional
-        // ellipsis renders an 11-char body as `Short body....`.
-        const truth = v.compiled_truth ?? '';
+        // Only elide when something was actually dropped (no `Short body....`);
+        // metadata-only rows (get_versions' default) preview the title instead.
+        const truth = v.compiled_truth ?? v.title ?? '';
         const head = truth.slice(0, VERSION_TRUTH_PREVIEW_CHARS);
         const elided = truth.length > VERSION_TRUTH_PREVIEW_CHARS ? '...' : '';
         return `#${v.id}  ${v.snapshot_at?.toString().slice(0, 19) || '?'}  ${head}${elided}`;
@@ -2266,6 +2266,7 @@ async function routeEngineFreeSubcommands(command: string, args: string[]): Prom
   // through to the engine-connected dispatch path below. (`args` here is the
   // subArgs slice already — no need to re-slice past the command.)
   if (command === 'status') {
+    if (args.includes('--funnel')) { setCliExitVerdict((await import('../commands/status-funnel.ts')).runStatusFunnel(args).exitCode); return true; }
     const cfgPre = loadConfig();
     if (cfgPre && isThinClient(cfgPre)) {
       const { runStatus } = await import('../commands/status.ts');

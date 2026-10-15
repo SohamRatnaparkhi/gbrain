@@ -173,7 +173,7 @@ function resolution(hold: Pick<ContentRefusal, 'code' | 'reason' | 'key' | 'line
     // #6188: frontmatter repair never rewrites a fence; the fence repair does.
     case 'invalid_fence': return `${path}: ${fenceWhere(hold.fence)} is malformed (${hold.fence?.reason ?? hold.reason ?? 'invalid_fence'}), and frontmatter repair does not change fences. `
       + `Preview its repair with gbrain repair fences --source ${sourceId} --only ${path} (read-only; it names the exact edit when gbrain will not repair it).`;
-    case 'file_too_large': return `Split ${path} into files under ${MAX_FILE_SIZE} bytes and commit, or leave it out of the source with sync.exclude.`;
+    case 'file_too_large': return `${path} is over the ${MAX_FILE_SIZE}-byte page limit, which no repair changes; every page under it imports and is searchable. Leave it out of the source with sync.exclude, or split it into files under the limit and commit.`;
     case 'frontmatter_slug_conflict': return `Remove the slug: line of ${path} (the path decides the slug), or move the file to the path its slug names.`;
     case 'content_rejected': return `Remove the junk the content-sanity gate matched in ${path}, or ask the user whether junk_disposition should stay reject.`;
     case 'purged_content': return `${path} carries purged page content; delete or edit it and commit, or the owner clears the tombstone with gbrain pages unpurge.`;

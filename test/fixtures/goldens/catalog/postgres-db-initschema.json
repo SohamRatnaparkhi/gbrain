@@ -151,6 +151,17 @@
       "open_loops.open_loops_pkey": "p PRIMARY KEY (id)",
       "open_loops.open_loops_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
       "open_loops.open_loops_status_check": "c CHECK ((status = ANY (ARRAY['open'::text, 'done'::text, 'dropped'::text, 'stale'::text])))",
+      "page_embedding_budget.page_embedding_budget_cap_usd_check": "c CHECK (((cap_usd IS NULL) OR (cap_usd >= (0)::double precision)))",
+      "page_embedding_budget.page_embedding_budget_page_id_fkey": "f FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE",
+      "page_embedding_budget.page_embedding_budget_pkey": "p PRIMARY KEY (page_id)",
+      "page_embedding_budget.page_embedding_budget_reserved_usd_check": "c CHECK ((reserved_usd >= (0)::double precision))",
+      "page_embedding_budget.page_embedding_budget_spent_usd_check": "c CHECK ((spent_usd >= (0)::double precision))",
+      "page_embedding_budget.page_embedding_budget_state_check": "c CHECK ((state = ANY (ARRAY['open'::text, 'held'::text, 'capped'::text])))",
+      "page_embedding_budget.page_embedding_budget_unpriced_calls_check": "c CHECK ((unpriced_calls >= 0))",
+      "page_extraction_state.page_extraction_state_page_id_fkey": "f FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE",
+      "page_extraction_state.page_extraction_state_pipeline_check": "c CHECK ((pipeline = ANY (ARRAY['facts_backstop'::text, 'extract_atoms'::text, 'conversation_facts'::text])))",
+      "page_extraction_state.page_extraction_state_pkey": "p PRIMARY KEY (page_id, pipeline)",
+      "page_extraction_state.page_extraction_state_watermark_bytes_check": "c CHECK ((watermark_bytes >= 0))",
       "page_generation_clock.page_generation_clock_id_check": "c CHECK ((id = 1))",
       "page_generation_clock.page_generation_clock_pkey": "p PRIMARY KEY (id)",
       "page_projection_jobs.page_projection_jobs_pkey": "p PRIMARY KEY (source_incarnation, slug)",
@@ -336,7 +347,7 @@
       "gbrain_require_persistence_protocol(required integer)": "RETURNS void kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=af07b7fac60dec0a4fe568217931ac449d32f73b3a53a047b3b02a5f59cb5058",
       "notify_minion_job_change()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=17f7c36408688409c80befd0a9ef9314e597d78a195418d1b94426e3d0b662f8",
       "update_chunk_search_vector()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=b870de46705a62891bb318ecdeca1d0d5ea1f8da9a9a79c4cec6569e515dbdeb",
-      "update_page_search_vector()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=f255236df404045eebb7bc67cda1339c5be26cf508a95bca2595c8ee8f064784"
+      "update_page_search_vector()": "RETURNS trigger kind=f lang=plpgsql volatility=v secdef=false config=[search_path=pg_catalog, public] body_sha256=a2a8cb721548b59c270080ad486950ea523bb6331ab085e0d543e243f2999360"
     },
     "grants": {
       "access_tokens": [
@@ -499,6 +510,12 @@
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
       "open_loops": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "page_embedding_budget": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "page_extraction_state": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
       "page_generation_clock": [
@@ -838,6 +855,10 @@
       "open_loops_pkey": "CREATE UNIQUE INDEX open_loops_pkey ON public.open_loops USING btree (id)",
       "open_loops_status_idx": "CREATE INDEX open_loops_status_idx ON public.open_loops USING btree (source_id, status, last_activity_at DESC)",
       "open_loops_thread_idx": "CREATE INDEX open_loops_thread_idx ON public.open_loops USING btree (source_id, thread_id) WHERE (status = 'open'::text)",
+      "page_embedding_budget_pkey": "CREATE UNIQUE INDEX page_embedding_budget_pkey ON public.page_embedding_budget USING btree (page_id)",
+      "page_embedding_budget_state_idx": "CREATE INDEX page_embedding_budget_state_idx ON public.page_embedding_budget USING btree (state) WHERE (state <> 'open'::text)",
+      "page_extraction_state_pkey": "CREATE UNIQUE INDEX page_extraction_state_pkey ON public.page_extraction_state USING btree (page_id, pipeline)",
+      "page_extraction_state_truncated_idx": "CREATE INDEX page_extraction_state_truncated_idx ON public.page_extraction_state USING btree (pipeline, page_id) WHERE (input_truncated IS NOT NULL)",
       "page_generation_clock_pkey": "CREATE UNIQUE INDEX page_generation_clock_pkey ON public.page_generation_clock USING btree (id)",
       "page_projection_jobs_pkey": "CREATE UNIQUE INDEX page_projection_jobs_pkey ON public.page_projection_jobs USING btree (source_incarnation, slug)",
       "page_purges_pkey": "CREATE UNIQUE INDEX page_purges_pkey ON public.page_purges USING btree (source_id, content_hash)",
@@ -1904,6 +1925,33 @@
           "19 closed_by text/text NULL",
           "20 created_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()",
           "21 updated_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
+      "page_embedding_budget": {
+        "columns": [
+          "1 page_id integer/int4 NOT NULL",
+          "2 state text/text NOT NULL DEFAULT 'open'::text",
+          "3 reason text/text NULL",
+          "4 embedding_signature text/text NULL",
+          "5 spent_usd double precision/float8 NOT NULL DEFAULT 0",
+          "6 reserved_usd double precision/float8 NOT NULL DEFAULT 0",
+          "7 reserved_at timestamp with time zone/timestamptz NULL",
+          "8 unpriced_calls integer/int4 NOT NULL DEFAULT 0",
+          "9 cap_usd double precision/float8 NULL",
+          "10 updated_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
+      "page_extraction_state": {
+        "columns": [
+          "1 page_id integer/int4 NOT NULL",
+          "2 pipeline text/text NOT NULL",
+          "3 pipeline_version integer/int4 NOT NULL",
+          "4 watermark_bytes bigint/int8 NULL",
+          "5 watermark_sha256 text/text NULL",
+          "6 input_truncated jsonb/jsonb NULL",
+          "7 updated_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },

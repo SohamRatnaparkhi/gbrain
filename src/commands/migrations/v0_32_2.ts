@@ -177,8 +177,8 @@ async function phaseBFenceFacts(
 
     try { await fenceUnfencedFacts(engine, plan); }
     catch (error) {
-      if (!(error instanceof OperationError) || error.code !== 'queue_capacity') throw error;
-      return { name: 'fence_facts', status: 'failed', detail: `queue_capacity: ${error.message} ${error.suggestion ?? ''}`.trim() };
+      if (!(error instanceof OperationError) || !['queue_capacity', 'write_quota_exhausted', 'write_quota_insufficient'].includes(error.code)) throw error;
+      return { name: 'fence_facts', status: 'failed', detail: `${error.code}: ${error.message} ${error.suggestion ?? ''}`.trim() };
     }
     return fenceFactsResult(outcome);
   } catch (e) {

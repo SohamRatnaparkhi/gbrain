@@ -280,14 +280,14 @@ describe('gbrain sources writer movement (I2, T4)', () => {
     const sampledAt = ago(0), committedAt = ago(1_000);
     const base = (over: Record<string, unknown>) => ({ source_id: 's', sampled_at: sampledAt, movement_state: 'moving', data_moving: true, not_moving_since: null, last_commit_at: committedAt, last_progress_at: committedAt,
       cursor: { index: 1, total: 4, remaining: 3, held: 0, last_progress_at: null, resume_command: 'gbrain sync --source s --no-pull' }, head: null, holds: { count: 0, stalled: 0, fences: 0, concurrent: 0, last_hold_at: null },
-      admitted: 1, live: { drain: true, drain_pid: 1, consumer: null }, ceiling_ms: 600_000, owner_is_this_host: true, writer_status_command: 'gbrain sources writer status --source s --json', ...over }) as Parameters<typeof movementReport>[1];
+      admitted: 1, live: { drain: true, drain_pid: 1, drain_job_id: null, consumer: null }, ceiling_ms: 600_000, owner_is_this_host: true, writer_status_command: 'gbrain sources writer status --source s --json', ...over }) as Parameters<typeof movementReport>[1];
     const states: Array<[ReturnType<typeof judgeMovement>, Parameters<typeof movementReport>[0], Parameters<typeof movementReport>[1]]> = [
       ['nothing_pending', undefined, base({ movement_state: 'nothing_pending', cursor: null, data_moving: null })],
       ['moved', base({ last_commit_at: ago(100_000) }), base({})],
       ['within_allowance', base({ head: { request_id: 'r', state: 'running', phase: 'preparing', step: 'a', step_since: ago(50_000), step_age_ms: 50_000, waiting_on: 'db', owner: null, last_sql: null, lapsed: false } }),
         base({ last_commit_at: null, head: { request_id: 'r', state: 'running', phase: 'preparing', step: 'b', step_since: ago(1_000), step_age_ms: 1_000, waiting_on: 'db', owner: null, last_sql: null, lapsed: false } })],
       ['held', base({ holds: { count: 0, stalled: 0, fences: 0, concurrent: 0, last_hold_at: null } }), base({ holds: { count: 1, stalled: 0, fences: 1, concurrent: 0, last_hold_at: ago(0) } })],
-      ['parked', base({ movement_state: 'parked', live: { drain: false, drain_pid: null, consumer: null } }), base({ movement_state: 'parked', live: { drain: false, drain_pid: null, consumer: null } })],
+      ['parked', base({ movement_state: 'parked', live: { drain: false, drain_pid: null, drain_job_id: null, consumer: null } }), base({ movement_state: 'parked', live: { drain: false, drain_pid: null, drain_job_id: null, consumer: null } })],
       ['not_moving', base({}), base({})],
     ];
     for (const [expected, before, after] of states) {

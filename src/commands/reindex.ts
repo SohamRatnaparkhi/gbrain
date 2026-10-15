@@ -89,6 +89,7 @@ USAGE
   gbrain reindex --multimodal [--limit N] [--workers N] [--dry-run] [--cost-estimate] [--no-embed] [--yes] [--json]
   gbrain reindex --aliases    [--limit N] [--dry-run] [--json] [--source <id>]
   gbrain reindex --vectors    [--dry-run] [--json]
+  gbrain reindex --oversized  [--limit N] [--dry-run] [--json] [--source <id>]
 
 TARGETS (exactly one required)
   --markdown        Re-chunk markdown pages whose chunker_version lags the
@@ -103,6 +104,14 @@ TARGETS (exactly one required)
                     pages whose frontmatter aliases predate the projection.
   --vectors         Rebuild every HNSW vector index from the stored vectors
                     (no re-embedding, no cost). Run after a PGLite WAL repair.
+  --oversized       Re-chunk pages an older gbrain stored without chunks
+                    because they were over 500 KB (embed_skip: oversized).
+                    Under content_sanity.bytes_block (default: the 24 MiB
+                    page ceiling) the marker is removed; over it the marker
+                    stays and the page gets no vectors. CPU only and free: it works
+                    with embeddings off and makes them keyword-searchable
+                    now. Pages over 1 MiB wait for approval before any paid
+                    embedding (gbrain embed --held). Resumable.
 
 OPTIONS
   --type <t>        --markdown only: restrict to one page type
@@ -119,7 +128,7 @@ OPTIONS
                     --dry-run, --no-embed and a keyless brain never ask);
                     --multimodal skips its cost confirm
   --max-usd USD     --markdown: approve the paid run with this cost cap
-  --source <id>     --aliases only: restrict to one source
+  --source <id>     --aliases and --oversized: restrict to one source
   --repo PATH       --markdown only: brain repo override
   --json            Machine-readable output
   --help, -h        Show this help
@@ -163,6 +172,7 @@ export function validateReindexModeScope(args: string[]): string | null {
   if (!args.includes('--type')) return null;
   if (args.includes('--multimodal')) return '--type is only supported with reindex --markdown, not --multimodal';
   if (args.includes('--aliases')) return '--type is only supported with reindex --markdown, not --aliases';
+  if (args.includes('--oversized')) return '--type is only supported with reindex --markdown, not --oversized';
   return null;
 }
 

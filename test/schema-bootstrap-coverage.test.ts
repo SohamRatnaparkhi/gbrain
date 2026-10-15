@@ -915,6 +915,12 @@ const COLUMN_EXEMPTIONS = new Set<string>([
   // the schema blob carries a comment, no CREATE TABLE column and no index
   // reads it, so there is no forward reference for the bootstrap to trip on.
   'content_chunks.embedding_pending_since',
+  // Large pages (Wave A) content_chunks.projected_byte_start/end (migration
+  // chunk_projected_spans): same posture as embedding_pending_since,
+  // migration-only so fresh and upgraded catalogs share column ordinals; no
+  // CREATE TABLE column or index in the blob reads them.
+  'content_chunks.projected_byte_start',
+  'content_chunks.projected_byte_end',
   // #5504 (wave 14 P4.1) open_loops.counterparty_source_id (migration
   // open_loops_counterparty_source): same posture as embedding_pending_since,
   // migration-only so fresh and upgraded brains share column ordinals; the

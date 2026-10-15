@@ -1,6 +1,6 @@
 import type { BrainEngine, ReservedConnection } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
-import { claimableWriteSql, foregroundPrioritySql, claimGroupFollowers, claimNextLaneHead, claimNextWrite, independentGroup, publicationGroupKey, compactWriteReceipts, floorPreparationAttempts, hasClaimableWrite, getWriteRequestById, releaseUnpublishedClaim, renewWriteClaim, vacuumPersistenceQueues } from './journal.ts';
+import { claimableWriteSql, foregroundPrioritySql, claimGroupFollowers, claimNextLaneHead, claimNextWrite, independentGroup, publicationGroupKey, floorPreparationAttempts, hasClaimableWrite, getWriteRequestById, releaseUnpublishedClaim, renewWriteClaim, vacuumPersistenceQueues } from './journal.ts';
 import { finishPreparationStalled, finishUnpublishedFailure, preparationAbortReason, recoverPublication, type PreparedMutation } from './coordinator.ts';
 import { localHostId } from './identity.ts';
 import { executeClaimedGroup, PAGE_BATCH_GROUP_MAX, publishSingleWrite, singleWrite } from './group-publish.ts';
@@ -17,6 +17,7 @@ import { claimedHeadOrder } from './sync-window.ts';
 import { laneClaim, laneOf, laneRoots, laneTask } from './sync-lanes.ts';
 import { runPersistenceEffects } from './effects.ts';
 import { settleNoopEmbeddingEffects, type NoopSettleCursor } from './embedding-noop-settle.ts';
+import { runCompactionPass } from './compaction-pass.ts';
 import { currentEmbeddingSignature } from '../embedding.ts';
 import { PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
 import { isWriteErrorCode } from './types.ts';
@@ -50,6 +51,8 @@ export const DEFAULT_ZOMBIE_CAP = 1;
 /** An effects drain running this long names itself on stderr (serve), then again at this cadence. */
 const DRAIN_NOTICE_AFTER_MS = 5_000;
 const DRAIN_NOTICE_EVERY_MS = 10_000;
+/** #6696 C7: at most one storage.keep_db policy pass (KEEP_DB_BATCH requests) per this interval. */
+const KEEP_DB_POLICY_INTERVAL_MS = 10 * 60_000;
 /** #6650: how often a consumer looks for claims held by an owner it can prove dead. */
 export const DEAD_OWNER_SCAN_MS = 5_000;
 const yieldToEventLoop = () => new Promise<void>(resolve => setImmediate(resolve));
@@ -198,6 +201,9 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
   private settleCursor: NoopSettleCursor | undefined;
   private topologyWorker: Promise<unknown> | undefined;
   private maintenanceWorker: Promise<unknown> | undefined;
+  /** #6696 C7: the storage.keep_db policy pass (resident owners only, at most one per KEEP_DB_POLICY_INTERVAL_MS while idle). */
+  private keepDbWorker: Promise<unknown> | undefined;
+  private nextKeepDb = 0;
   private nextMaintenance = 0;
   private publishedSinceMaintenance = 0;
   private maintenanceVolume = 50;
@@ -238,7 +244,9 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       /** #6278: abandoned preparations past the ceiling before this process stops claiming (default DEFAULT_ZOMBIE_CAP). */
       zombieCap?: number;
       /** Write the long-drain progress line on stderr (serve; never a CLI command that may print --json). */
-      drainNotice?: boolean } = {}) {
+      drainNotice?: boolean;
+      /** #6696 C7: run the storage.keep_db policy (repair/keep-db-policy.ts) for the sources this host owns while idle. */
+      keepDbPolicy?: boolean } = {}) {
     this.hostId = opts.hostId ?? localHostId();
     this.statements = consumerStatementEngine(engine);
   }
@@ -490,8 +498,13 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
           await this.phase('refresh_roots', signal => refreshManagedFilesystemRoots(this.engine,
             this.engine.kind === 'pglite' ? this.config.database_path : undefined, signal));
           // F4b: idle maintenance also refreshes stale PGLite planner statistics (a no-op on Postgres).
-          this.maintenanceWorker = compactWriteReceipts(this.engine).then(() => maybeRefreshPlannerStats(this.engine, 'idle'))
+          this.maintenanceWorker = runCompactionPass(this.engine, { hostId: this.hostId, notice: this.opts.drainNotice }).then(() => maybeRefreshPlannerStats(this.engine, 'idle'))
             .catch(error => this.report(error)).finally(() => { this.maintenanceWorker = undefined; });
+        }
+        if (this.opts.keepDbPolicy && !this.opts.requestsOnly && !this.keepDbWorker && Date.now() >= this.nextKeepDb) {
+          this.nextKeepDb = Date.now() + KEEP_DB_POLICY_INTERVAL_MS;
+          this.keepDbWorker = import('../repair/keep-db-policy.ts').then(({ runKeepDbPolicy }) => runKeepDbPolicy(this.engine, { hostId: this.hostId }))
+            .catch(error => this.report(error)).finally(() => { this.keepDbWorker = undefined; });
         }
         return;
       }
@@ -526,7 +539,7 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
     if (!this.maintenanceWorker && (Date.now() >= this.nextMaintenance || this.publishedSinceMaintenance >= this.maintenanceVolume)) {
       this.nextMaintenance = Date.now() + 60_000;
       this.publishedSinceMaintenance = 0;
-      this.maintenanceWorker = compactWriteReceipts(this.engine).then(() => vacuumPersistenceQueues(this.engine))
+      this.maintenanceWorker = runCompactionPass(this.engine, { hostId: this.hostId, notice: this.opts.drainNotice }).then(() => vacuumPersistenceQueues(this.engine))
         .then(rows => { this.maintenanceVolume = 50 + Math.ceil(rows * 0.2); }).catch(error => this.report(error))
         .finally(() => { this.maintenanceWorker = undefined; });
     }
@@ -1074,6 +1087,7 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
     await this.effectsWorker;
     await this.topologyWorker;
     await this.maintenanceWorker;
+    await this.keepDbWorker;
     this.unobserveCheckout?.();
     this.unobserveCheckout = undefined;
     try { this.loopDelay?.disable(); } catch { /* fail-open */ }

@@ -477,7 +477,7 @@ export interface ContentHold {
 export function contentSizeHold(byteLength: number, maxBytes: number, codeFile = false): ContentHold | null {
   if (byteLength <= maxBytes) return null;
   return { code: 'file_too_large', message: codeFile ? `Code file too large (${byteLength} bytes)`
-    : `Content too large (${byteLength} bytes, max ${maxBytes}). Split the content into smaller files or remove large embedded assets.` };
+    : `Content too large (${byteLength} bytes, max ${maxBytes}). Every page under that limit is stored and searchable; leave this file out of the source, or split it into files under the limit.` };
 }
 
 const HOLD_GUIDANCE: Record<InvalidFrontmatterReason, string> = {
@@ -853,10 +853,24 @@ export function findTimelineSplitIndex(lines: string[]): number {
   // A sentinel quoted inside a fenced code block (a markdown example) is not
   // a separator. Mispaired fences (see MarkdownCodeMap) leave every candidate
   // live, as before.
-  return findLineOutsideFencedCode(lines, (i) => isTimelineSentinelLine(lines, i));
+  const firstContent = firstContentLineIndex(lines);
+  return findLineOutsideFencedCode(lines, (i) => isTimelineSentinelLine(lines, i, firstContent));
 }
 
-function isTimelineSentinelLine(lines: string[], i: number): boolean {
+/**
+ * Index of the first line holding a non-whitespace character, or
+ * `lines.length`. `lines.slice(0, i).join('\n').trim()` is empty exactly when
+ * `i <= firstContentLineIndex(lines)`, so the sentinel rules ask "does the
+ * prefix above line i have content?" in O(1) instead of re-joining every line
+ * above each candidate (O(n^2) on chat exports separated by `---`).
+ */
+function firstContentLineIndex(lines: readonly string[]): number {
+  let i = 0;
+  while (i < lines.length && lines[i]!.trim().length === 0) i++;
+  return i;
+}
+
+function isTimelineSentinelLine(lines: string[], i: number, firstContent: number): boolean {
   const trimmed = lines[i].trim();
 
   if (trimmed === '<!-- timeline -->' || trimmed === '<!--timeline-->') {
@@ -868,8 +882,7 @@ function isTimelineSentinelLine(lines: string[], i: number): boolean {
   }
 
   if (trimmed === '---') {
-    const beforeContent = lines.slice(0, i).join('\n').trim();
-    if (beforeContent.length === 0) return false;
+    if (i <= firstContent) return false;
 
     for (let j = i + 1; j < lines.length; j++) {
       const next = lines[j].trim();
@@ -899,6 +912,7 @@ const DATED_BULLET_RE = /^\s*[-*+]\s+\**\d{4}\b/;
  * included, next H2 excluded) or null.
  */
 function findBareTimelineSection(lines: string[]): { start: number; end: number } | null {
+  const firstContent = firstContentLineIndex(lines);
   let inFence = false;
   for (let i = 0; i < lines.length; i++) {
     const fence = /^\s*(`{3,}|~{3,})/.exec(lines[i]);
@@ -908,8 +922,7 @@ function findBareTimelineSection(lines: string[]): { start: number; end: number 
     }
     if (inFence) continue;
     if (!/^##\s+(timeline|history)\b/i.test(lines[i].trim())) continue;
-    const beforeContent = lines.slice(0, i).join('\n').trim();
-    if (beforeContent.length === 0) continue;
+    if (i <= firstContent) continue;
 
     // Lookahead: section extent + timeline shape. Any non-blank line that is
     // neither a dated bullet nor a continuation of one (incl. fence openers)

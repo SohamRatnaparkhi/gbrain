@@ -31,7 +31,7 @@ import {
 } from './admission.ts';
 import {
   defaultTimeoutMsFor, HANDLER_DEFAULT_TIMEOUT_MS,
-  defaultLockDurationMsFor, HANDLER_DEFAULT_LOCK_DURATION_MS, clampLockDurationMs,
+  defaultLockDurationMsFor, HANDLER_DEFAULT_LOCK_DURATION_MS, clampLockDurationMs, WALL_CLOCK_THRESHOLD_MS_SQL,
 } from './handler-timeouts.ts';
 import {
   withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay,
@@ -1650,11 +1650,7 @@ export class MinionQueue {
         `SELECT id, parent_job_id FROM minion_jobs
           WHERE status = 'active'
             AND started_at IS NOT NULL
-            AND EXTRACT(EPOCH FROM (now() - started_at)) * 1000 >
-              CASE
-                WHEN timeout_ms IS NOT NULL THEN timeout_ms * 2
-                ELSE COALESCE(lock_duration_ms, $1)::double precision * 2 * GREATEST(max_stalled, 1)
-              END`,
+            AND EXTRACT(EPOCH FROM (now() - started_at)) * 1000 > ${WALL_CLOCK_THRESHOLD_MS_SQL}`,
         [lockDurationMs]
       );
       if (candidates.length === 0) return [];

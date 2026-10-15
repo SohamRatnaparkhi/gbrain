@@ -43,6 +43,7 @@
  * trigger lock acquisition.
  */
 
+import { withAdmissionOrigin } from './persistence/admission-origin.ts';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, statSync, realpathSync } from 'fs';
 import { join } from 'path';
 import { gbrainPath, loadConfig } from './config.ts';
@@ -489,6 +490,8 @@ export interface CycleReport {
      */
     phantoms_skipped_drift: number;
   };
+  /** #6696 (A4): `write_capacity_low` / `write_capacity_backpressure` when a cumulative write cap needs attention (every cycle, unthrottled). */
+  notices?: import('./agent-output.ts').Notice[];
 }
 
 export interface CycleOpts {
@@ -1894,6 +1897,17 @@ async function runRepairLanePhase(phase: typeof REPAIR_LANE_PHASES[number], engi
  * single-phase runs are always responsive even if another cycle is live.
  */
 export async function runCycle(
+  engine: BrainEngine | null,
+  opts: CycleOpts,
+): Promise<CycleReport> {
+  // #6696 (A5): every cycle phase is background work, even under an operator's command.
+  const report = await withAdmissionOrigin('background', () => runCycleUnscoped(engine, opts));
+  if (!engine || report.status === 'skipped' || opts.dryRun) return report;
+  const notices = await (await import('./persistence/capacity-snapshot.ts')).capacityNotices(engine, { throttle: false }).catch(() => []);
+  return notices.length ? { ...report, notices } : report;
+}
+
+async function runCycleUnscoped(
   engine: BrainEngine | null,
   opts: CycleOpts,
 ): Promise<CycleReport> {

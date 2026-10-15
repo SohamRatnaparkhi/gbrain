@@ -44,6 +44,7 @@ import { withCoordinatedWrite } from './context.ts';
 import { maintenanceAttribution } from './attribution.ts';
 import { readConnectorV2Cutoff } from './connector-checkpoint-migration.ts';
 import { declarePersistenceProtocol } from './protocol.ts';
+import { PERSISTENCE_IPC_MAX_BYTES } from './ipc.ts';
 import type { GoogleSourceConfig } from '../google/types.ts';
 
 interface ConnectorLease { handle: DbLockHandle; signal: AbortSignal; }
@@ -363,7 +364,7 @@ export class ManagedConnectorSync {
     }
     const limits = await readJournalLimits(this.engine);
     this.outstandingCap = Math.max(1, Math.min(90, limits.principalOutstanding - 10));
-    this.intentByteCap = Math.max(1024 ** 2, Math.floor(limits.principalIntentBytes / 2));
+    this.intentByteCap = Math.max(1024 ** 2, Math.floor(Math.min(limits.principalIntentBytes, PERSISTENCE_IPC_MAX_BYTES) / 2));
     this.connectorState = await readManagedConnectorState(this.engine, this.sourceId, this.source.incarnation);
     await this.resolvePendingSet();
     const [row] = await this.engine.executeRaw<{ completed_keys: unknown[] }>("SELECT completed_keys FROM op_checkpoints WHERE op='managed-connector' AND fingerprint=$1", [this.checkpointKey]);

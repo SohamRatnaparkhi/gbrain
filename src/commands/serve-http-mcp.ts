@@ -27,7 +27,7 @@ import { STATUS_TOOL_NAME, statusModeOf, statusToolResult } from '../mcp/status-
 import { isCallable, publishGatesFromDisabled } from '../core/ops/callable.ts';
 import { scopeDeniedError } from '../core/ops/op-fix.ts';
 import { resolveStrictParamsMode } from '../mcp/validate-params.ts';
-import { GBRAIN_CLIENT_HEADER, resolveResultRowsMode, resultRowsForRequest, type ResultRowsMode } from '../mcp/result-rows.ts';
+import { GBRAIN_CLIENT_HEADER, isGbrainThinClient, resolveResultRowsMode, resultRowsForRequest, type ResultRowsMode } from '../mcp/result-rows.ts';
 import { buildToolDefs } from '../mcp/tool-defs.ts';
 import {
   filterOpsForSurface,
@@ -57,6 +57,8 @@ interface McpRequestState {
   surfaceAllowedOps: ReadonlySet<string> | undefined;
   /** C1: search/query row shape for this request (thin-client header, else host `mcp.result_rows`). */
   resultRows: ResultRowsMode;
+  /** Large pages: the same header marks gbrain's thin client, whose default get_page mode stays whole. Never authority. */
+  thinClient: boolean;
 }
 
 export function mountMcp(app: Express, ctx: ServeHttpContext): void {
@@ -161,7 +163,8 @@ export function mountMcp(app: Express, ctx: ServeHttpContext): void {
     authInfo.effectiveSurface = surface;
     const surfaceAllowedOps: ReadonlySet<string> | undefined =
       surface === 'full' && authInfo.allowedOperations == null ? undefined : new Set(mcpOperations.map(o => o.name));
-    const state: McpRequestState = { authInfo, agentName, startTime, mcpOperations, surface, surfaceCeiling, surfaceAllowedOps, resultRows };
+    const thinClient = isGbrainThinClient(req.get(GBRAIN_CLIENT_HEADER));
+    const state: McpRequestState = { authInfo, agentName, startTime, mcpOperations, surface, surfaceCeiling, surfaceAllowedOps, resultRows, thinClient };
     const server = createMcpRequestServer(ctx, state, writeback);
     await serveMcpRequest(server, req, res);
   });
@@ -288,7 +291,7 @@ async function listMcpTools(ctx: ServeHttpContext, state: McpRequestState) {
 
 async function callMcpTool(ctx: ServeHttpContext, state: McpRequestState, request: CallToolRequest): Promise<ToolResult> {
   const { engine, broadcastEvent, logFullParams } = ctx;
-  const { authInfo, agentName, startTime, mcpOperations, surface, surfaceCeiling, surfaceAllowedOps, resultRows } = state;
+  const { authInfo, agentName, startTime, mcpOperations, surface, surfaceCeiling, surfaceAllowedOps, resultRows, thinClient } = state;
   const { name, arguments: params } = request.params;
   // A server that recovered from status-only mode answers clients still holding the status tool list (never listed).
   const statusMode = name === STATUS_TOOL_NAME ? statusModeOf(engine) : null;
@@ -387,6 +390,7 @@ async function callMcpTool(ctx: ServeHttpContext, state: McpRequestState, reques
   try {
     toolResult = await dispatchToolCall(engine, name, params as Record<string, unknown> | undefined, {
       remote: true,
+      admissionOrigin: 'interactive',
       // WP1/D7: network transport — the dispatch-layer localOnly
       // backstop keys off this marker.
       transport: 'http',
@@ -404,6 +408,7 @@ async function callMcpTool(ctx: ServeHttpContext, state: McpRequestState, reques
       // D2: a callable tool the advertised surface leaves out of tools/list (same rule as listMcpTools).
       isListed: async op => !!authInfo.surface || advertisedOps([op], surface, await resolveAdvertisedSurface(engine, ctx.config)).length > 0,
       resultRows,
+      ...(thinClient ? { thinClient: true } : {}),
       // v0.31 follow-up fix: thread auth so the whoami op (and any
       // future scope-aware handlers) can introspect the caller. The
       // original D12/eE1 refactor moved dispatch into dispatchToolCall

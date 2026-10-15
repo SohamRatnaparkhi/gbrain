@@ -7,8 +7,8 @@
  * no title word in common, through the coordinated file repair (file
  * rewritten, imported, hold cleared, Git commit `gbrain: repair frontmatter
  * slug in <path>` with the `gbrain-repair:` trailer, a content_repair
- * receipt); a slug that resolves through an alias to the file's own page is
- * `already_exempt`; a duplicate pair goes to the model tier at apply time
+ * receipt); a slug that resolves through an alias to the file's own page,
+ * which sync still holds, is `slug_page_mismatch` (#6696 C8); a duplicate pair goes to the model tier at apply time
  * while the preview calls no model; a stubbed `merge_into` writes nothing,
  * records the verdict on the hold as codes and slugs, and `sync status`
  * renders `needs_human` with a paragraph naming the canonical; a stubbed
@@ -126,7 +126,7 @@ test('registry: preview-bound, spends llm, clears no doctor check, not explicit-
   expect(parseRepairArgs(['slug-conflicts', '--source', 's', '--only', 'notes/a.md', '--no-llm', '--apply', '--expect', 'abc'])).toMatchObject({ kind: 'slug-conflicts', only: ['notes/a.md'], noLlm: true, expect: 'abc' });
 });
 
-test('deterministic tier: a stray slug (no page, no file) and a slug naming a page of another type lose the line; an alias to the own page is exempt; the preview writes nothing', () => each(async () => {
+test('deterministic tier: a stray slug (no page, no file) and a slug naming a page of another type lose the line; an alias to the own page, which sync holds, is slug_page_mismatch; the preview writes nothing', () => each(async () => {
   const s = await managed({
     'companies/acme-example.md': page('Acme Widgets', 'company', 'A synthetic company.'),
     'people/carol-example.md': page('Carol Example', 'person', 'A synthetic person.'),
@@ -134,7 +134,7 @@ test('deterministic tier: a stray slug (no page, no file) and a slug naming a pa
     'people/bob-example.md': page('Bob Example', 'person', 'A synthetic person who works at the company.', 'slug: companies/acme-example\n'),
   });
   expect((await s.sync()).held_count).toBe(2);
-  // An alias to the file's own page: held by the screen, exempt for the lane.
+  // An alias to the file's own page: held by the screen, so the lane (#6696 C8: the same screen) keeps it as slug_page_mismatch.
   await engine.transaction(async tx => {
     await tx.executeRaw("SELECT set_config('gbrain.write_sources', $1, true)", [JSON.stringify([s.id])]);
     await tx.executeRaw('INSERT INTO slug_aliases (source_id, alias_slug, canonical_slug) VALUES ($1, $2, $3)', [s.id, 'people/carol', 'people/carol-example']);
@@ -145,8 +145,8 @@ test('deterministic tier: a stray slug (no page, no file) and a slug naming a pa
   const preview = await s.run();
   expect(calls).toHaveLength(0);
   expect(preview.listing!.map(entry => [entry.item, entry.class]).sort()).toEqual([
-    [`${s.id}:notes/stray.md`, 'deterministic'], [`${s.id}:people/bob-example.md`, 'deterministic'], [`${s.id}:people/carol-example.md`, 'already_exempt']]);
-  expect(details(preview).counts).toEqual({ deterministic: 2, llm: 0, held: 0, skipped: 1 });
+    [`${s.id}:notes/stray.md`, 'deterministic'], [`${s.id}:people/bob-example.md`, 'deterministic'], [`${s.id}:people/carol-example.md`, 'slug_page_mismatch']]);
+  expect(details(preview).counts).toEqual({ deterministic: 2, llm: 0, held: 1, skipped: 0 });
   expect(details(preview).diffs.map(d => d.rule).sort()).toEqual(['absent_page', 'different_type']);
   expect(details(preview).diffs[0]!.diff).toContain('-slug: ');
   expect(preview.cost.llm_usd).toBe(0);
@@ -171,7 +171,7 @@ test('deterministic tier: a stray slug (no page, no file) and a slug naming a pa
   expect(git(s.root, 'log', '-1', '--format=%(trailers:key=gbrain-repair,valueonly)')).toMatch(/^frontmatter_slug_conflict deterministic high/);
   expect(git(s.root, 'status', '--porcelain')).toBe('');
   expectNoSecrets([holds, rows, surfaceOf(applied), log]);
-  // The hold fix of the remaining (exempt) hold names the content repair preview.
+  // The hold fix of the remaining (slug_page_mismatch) hold names the content repair preview.
   expect(gitHoldItem(holds[0]!).fix.argv).toEqual(['gbrain', 'repair', 'content', '--source', s.id, '--only', 'people/carol-example.md']);
 }), 240_000);
 

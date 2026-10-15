@@ -14,7 +14,11 @@
  * The first case forces the interleaving: a real topology change pauses right
  * after its brain lock, an ordinary put_page runs until it blocks behind it,
  * then the topology change continues and must never wait on another session:
- * what queued behind it took the brain row before any other row. The second
+ * what queued behind it took the brain row before any other row. Only lock
+ * waits of the change's own transaction count (its virtual transaction id in
+ * `pg_locks`): once it commits, its pooled connection serves other work, and a
+ * wait there is not the change waiting (#6703: one such wait behind another
+ * session's commit failed the case with no deadlock). The second
  * case races ordinary writes against claims and topology changes while
  * sampling `pg_blocking_pids` for two sessions waiting on each other, and
  * requires no such cycle, no deadlock (40P01), and every write and change
@@ -122,6 +126,7 @@ describeE2E('publication lock order vs brain-row administration (Postgres)', () 
       const topology = settle(scope.run({ label: 'topology', onBrainLocked: async pid => { held(pid); await resumed; } },
         () => runManagedSourceLifecycle(engine, { operation: 'add', sourceId: `probe-${round}`, path: probe })));
       const pid = await brainHeld;
+      const [{ vxid }] = await monitor`SELECT virtualtransaction AS vxid FROM pg_locks WHERE pid = ${pid}::int AND locktype = 'virtualxid'`;
       const write = settle(scope.run({ label: 'writer' }, () => put(`notes/during-${round}`, note(`During ${round}`, `written during topology ${round}`))));
       await waitFor(async () => (await monitor`SELECT 1 FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`).length ? true : undefined, 5000);
       // Let every statement the write reaches queue up behind the paused change, then watch what the change waits on.
@@ -131,7 +136,8 @@ describeE2E('publication lock order vs brain-row administration (Postgres)', () 
       const settled = Promise.all([topology, write]).finally(() => { done = true; });
       const blockers = new Set<string>();
       while (!done) {
-        for (const row of await monitor`SELECT a.query FROM pg_stat_activity a WHERE a.pid = ANY(pg_blocking_pids(${pid}::int))`) {
+        for (const row of await monitor`SELECT a.query FROM pg_locks l CROSS JOIN LATERAL unnest(pg_blocking_pids(l.pid)) AS b(pid) JOIN pg_stat_activity a ON a.pid = b.pid
+          WHERE l.pid = ${pid}::int AND l.virtualtransaction = ${vxid} AND NOT l.granted`) {
           blockers.add(String(row.query).replace(/\s+/g, ' ').slice(0, 200));
         }
         await new Promise(r => setTimeout(r, 10));

@@ -22,6 +22,7 @@ import { gitHoldStatusLines, readGitHoldStatuses } from '../src/core/persistence
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { PAGE_MAX_BYTES } from '../src/core/page-size-policy.ts';
 
 const backends = testBackends();
 const home = mkdtempSync(join(tmpdir(), 'gbrain-sync-holds-'));
@@ -108,9 +109,9 @@ test('fixing and committing the file imports it and clears the hold; deleting a 
   expect(result.holds_outstanding).toBeUndefined();
 }), 180_000);
 
-test('slug conflicts and files over 5 MB and over the 10 MiB read bound are held; valid files keep importing', () => each(async engine => {
-  const big = `---\ntitle: Big\n---\n${'x'.repeat(6_000_000)}\n`;
-  const huge = `---\ntitle: Huge\n---\n${'y'.repeat(11 * 1024 * 1024)}\n`;
+test('slug conflicts and files over the page ceiling (the sync read bound) are held; valid files keep importing', () => each(async engine => {
+  const big = `---\ntitle: Big\n---\n${'x'.repeat(PAGE_MAX_BYTES + 16)}\n`;
+  const huge = `---\ntitle: Huge\n---\n${'y'.repeat(PAGE_MAX_BYTES + 1024 * 1024)}\n`;
   const s = await source(engine, { 'notes/slug.md': '---\ntitle: Slug\nslug: notes/elsewhere\n---\nBody.\n', 'notes/big.md': big, 'notes/huge.md': huge, 'notes/ok.md': note('Ok') });
   const result = await s.sync();
   expect(result).toMatchObject({ status: 'first_sync', added: 1, held_count: 3 });
@@ -125,7 +126,7 @@ test('slug conflicts and files over 5 MB and over the 10 MiB read bound are held
 
 test('an oversized pinned blob is held by its size even when the working copy is small', () => each(async engine => {
   const s = await source(engine, { 'notes/ok.md': note('Ok') });
-  s.write('notes/history.md', `---\ntitle: History\n---\n${'z'.repeat(11 * 1024 * 1024)}\n`); commit(s.root, 'big');
+  s.write('notes/history.md', `---\ntitle: History\n---\n${'z'.repeat(PAGE_MAX_BYTES + 1024 * 1024)}\n`); commit(s.root, 'big');
   s.write('notes/history.md', note('Small now'));
   const result = await s.sync();
   expect(result.held?.map(item => [item.path, item.code])).toEqual([['notes/history.md', 'file_too_large']]);

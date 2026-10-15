@@ -74,6 +74,8 @@ export interface SyncStatus {
   cursor: { index: number; total: number; pinned_target: string | null; last_advance_at: string | null; done: boolean } | null;
   /** Managed sync page requests of the source committed in the last ten minutes (waived entries are not requests). */
   committed_last_10m: number;
+  /** #6706: the active `sync` Minions job draining this cursor (its `next` watches it), or null. */
+  live_job_id: number | null;
   rate_pages_per_min: number | null;
   eta_seconds: number | null;
   holds: SyncStatusHold[];
@@ -206,7 +208,12 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string): Pro
   const selfHealing = lastError?.detail === 'knock_on' || lastError?.detail === 'run_replaced';
   const actionable = holds.filter(hold => !hold.needs_human && hold.safe_actions[0] !== 'none');
   const verify = { argv: ['gbrain', 'sync', 'status', '--source', sourceId, '--json'] };
-  const next: Action | null = human
+  // #6706: a live sync job already drains this cursor; the agent watches it instead of starting a second drainer beside it.
+  const liveJob = unfinished && !human ? await (await import('./sync-movement.ts')).liveSyncJob(engine, sourceId) : null;
+  const next: Action | null = liveJob !== null
+    ? { argv: ['gbrain', 'jobs', 'get', String(liveJob), '--json'], consent: [], actor: 'agent', requires_exclusive: false, verify,
+      why: `Sync job #${liveJob} is draining this cursor (${header!.index}/${header!.total}); it resumes the frozen manifest on its own, so watch it rather than running a second sync beside it.` }
+    : human
     ? { ...('fix' in human ? human.fix : { argv: ['gbrain', 'sources', 'status', sourceId, '--json'], consent: [], actor: 'host_admin' as const, requires_exclusive: false, why: human.human_reason ?? '' }),
       user_message: `Sync of source ${sourceId} needs a decision: ${'slug' in human && human.slug ? `page ${human.slug} (${('path' in human ? human.path : undefined) ?? ''})` : `code ${human.code}`}: ${human.human_reason ?? 'see the hold'}` }
     : actionable.length
@@ -226,7 +233,7 @@ export async function readSyncStatus(engine: BrainEngine, sourceId: string): Pro
   const { recovery_next, ...terminal } = await terminalSummary(engine, sourceId, blockers.checkpoint_blockers);
   return { source_id: sourceId, run_id: header?.runId ?? null,
     cursor: header ? { index: Number(header.index), total: Number(header.total), pinned_target: header.target ?? null, last_advance_at: p ? new Date(p.lastAt).toISOString() : null, done: !!header.done } : null,
-    committed_last_10m: Number(committed?.n ?? 0), ...estimate, holds, last_error: lastError, needs_human: !!human, ...(human ? { human_reason: human.human_reason } : {}),
+    committed_last_10m: Number(committed?.n ?? 0), ...estimate, live_job_id: liveJob, holds, last_error: lastError, needs_human: !!human, ...(human ? { human_reason: human.human_reason } : {}),
     resume_argv: resume, ...blockers, cursors: await liveCursors(engine, sourceId, source.incarnation, selected?.key ?? null, failures),
     terminal_failures: terminal, next: next ?? recovery_next ?? null };
 }

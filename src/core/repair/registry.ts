@@ -63,6 +63,8 @@ import { slugConflictsRepair } from './slug-conflicts.ts';
 import { frontmatterKeysRepair } from './frontmatter-keys.ts';
 import { fileDriftRepair } from './file-drift.ts';
 import { stuckRecoveryRepair } from './stuck-recovery.ts';
+import { ghostPagesRepair, GHOST_CONSENT_TEXT, GHOST_CONSEQUENCES, GHOST_PURGE_FUSE_HOURS } from './ghost-pages.ts';
+import { receiptCompactionRepair } from './receipt-compaction.ts';
 import { ERROR_CATALOGUE, catalogueError } from '../error-catalogue.ts';
 import type { OperationError } from '../ops/contract.ts';
 
@@ -274,7 +276,8 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
     summary: 'Resolve pages whose canonical file differs from the database (source_changed / file_database_drift, #6643) through canonical reconciliation: '
       + '--prefer file or --prefer database wins every ordinary field, within reconcile\'s protections (protected metadata stays as stored, tags are '
       + 'the union, protected takes and private fact rows are kept; the preview lists each page\'s exceptions). Select with --slug <slug>, --request '
-      + '<conflict request id> or --all-drifted (refused across mixed drift classes unless --class <name> keeps one). Needs --source. The preview '
+      + '<conflict request id> or --all-drifted (refused across mixed drift classes unless --class <name> keeps one), narrowed by --only/--skip '
+      + 'canonical file path globs (* within a segment, ** across; bound into the hash and the apply command). Needs --source. The preview '
       + 'writes each resolved result to a private artifact; --apply --expect <hash> applies exactly that set with request ids derived from the hash, '
       + 'resumable, per page repaired, refused or changed_since_preview. Backups are reconcile\'s own. Trusted local CLI only; runs only when named.',
   },
@@ -292,6 +295,30 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'Apply on the owner host with --apply --expect <hash> --keep prior|disk --yes (no default): both versions are backed up first; prior writes the recorded '
       + 'bytes back and the accepted write publishes again, disk keeps the edit and abandons the write (reconcile the page afterwards). A terminal request is '
       + 'refused (recovery_choice_refused). Runs only when named.',
+  },
+  'ghost-pages': {
+    handler: ghostPagesRepair, embeds: 'none', checks: ['ghost_pages'], explicit_only: true, preview_bound: true, consent: 'destructive',
+    consentText: GHOST_CONSENT_TEXT,
+    summary: 'Soft-delete live pages whose canonical file is missing on the owner host (ghost pages, #6696): every write to them refuses source_changed / '
+      + 'canonical_file_missing and no sync can import a file that is not there. Needs --source; refused off the canonical owner host (not_owner_host) '
+      + 'and when the checkout cannot be read (ghost_storage_unknown). Declared db_only and never-filed derived pages are never listed. The preview lists '
+      + 'each page with its recorded path and revision, bound to the owner; --apply --expect <hash> --yes soft-deletes exactly that set through delete_page, '
+      + 'rechecking each file is still absent (a restored file keeps its page and asks for a new preview). Refused when ghosts are over half of the source\'s '
+      + `file-backed pages unless GBRAIN_ALLOW_MASS_RECONCILE=1. Purged after ${GHOST_PURGE_FUSE_HOURS} h; ${GHOST_CONSEQUENCES.undo} Runs only when named.`,
+  },
+  'receipt-compaction': {
+    handler: receiptCompactionRepair, embeds: 'none', checks: ['persistence_capacity'], explicit_only: true, preview_bound: true, consent: 'destructive',
+    consentText: {
+      what: 'Compact the previewed terminal write receipts now',
+      why: 'The preview selected terminal receipts older than the cutoff it printed; compacting them drops each one\'s intent and error message and returns its unused receipt bytes to the capacity counters.',
+      risk: 'Database rows only. A compacted receipt still answers its request id with its outcome, error code and detail, but its original intent is gone and cannot be restored. Open sync runs and the newest sync receipt of each worktree are never touched.',
+      user_message: 'Compact the previewed write receipts? Their original request bodies are dropped for good; outcomes stay',
+    },
+    summary: 'Compact terminal write receipts now instead of waiting for idle maintenance (#6696), returning their unused receipt bytes. Same compaction as the '
+      + 'consumer: the intent and error message go, the outcome, error code and detail stay. --older-than <72h|30d> is floored at the configured retention '
+      + '(persistence.receipt_retention_days) unless --force; committed receipts only unless --include-failures. Receipts of a run whose sync cursor is '
+      + 'open, and the newest sync receipt per worktree, are kept. Preview-bound and destructive: --apply --expect <hash> --yes compacts only the '
+      + 'previewed set. No admission, so it runs at a full cap. Brain-wide. Runs only when named.',
   },
 };
 
@@ -377,14 +404,15 @@ export async function repairRunner(engine: BrainEngine, opts: { apply: boolean; 
     async run(kind: RepairKind, scope: RepairScope, run: { limit?: number; sourceFlag?: string; explicit?: boolean; expect?: string; includeAmbiguous?: boolean; only?: string[]; skip?: string[];
       slugs?: string[]; noLlm?: boolean; maxLlmUsd?: number; deadline?: number;
       prefer?: 'file' | 'database'; requests?: string[]; allDrifted?: boolean; driftClass?: string;
-      keep?: 'prior' | 'disk'; requestId?: string } = {}): Promise<RepairResult> {
+      keep?: 'prior' | 'disk'; requestId?: string; olderThan?: string; includeFailures?: boolean; force?: boolean } = {}): Promise<RepairResult> {
       const ctx = { engine, config, logger, dryRun: !opts.apply, remote: false, sourceId: scope.source_ids[0], writeWaitMs } as OperationContext;
       const spec = repairSpec(kind, opts.registry);
       return runRepair(ctx, spec.handler, scope, { apply: opts.apply, limit: run.limit, embeddingModel, sourceFlag: run.sourceFlag, spec,
-        embed: !opts.noEmbed && embeddingModel !== undefined, applyArgs: opts.noEmbed && spec.embeds === 'inline' ? ['--no-embed'] : [],
+        embed: !opts.noEmbed && embeddingModel !== undefined, applyArgs: [...(opts.noEmbed && spec.embeds === 'inline' ? ['--no-embed'] : []),
+          ...(run.olderThan ? ['--older-than', run.olderThan] : []), ...(run.includeFailures ? ['--include-failures'] : []), ...(run.force ? ['--force'] : [])],
         explicit: run.explicit, expect: run.expect, includeAmbiguous: run.includeAmbiguous, only: run.only, skip: run.skip, slugs: run.slugs, noLlm: run.noLlm,
         maxLlmUsd: run.maxLlmUsd, deadline: run.deadline, prefer: run.prefer, requests: run.requests, allDrifted: run.allDrifted, driftClass: run.driftClass,
-        keep: run.keep, requestId: run.requestId });
+        keep: run.keep, requestId: run.requestId, olderThan: run.olderThan, includeFailures: run.includeFailures, force: run.force });
     },
   };
 }

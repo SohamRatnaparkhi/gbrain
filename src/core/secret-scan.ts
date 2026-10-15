@@ -95,6 +95,7 @@ export {
   SCAN_ALLOW_FILENAME, ALLOWLIST_FINGERPRINT_MIN_HEX, loadWorkspaceAllowlist, globToRegExp, matchesGlob, valueAllowlisted, pathAllowlisted,
 } from './secret-scan-allowlist.ts';
 import { valueAllowlisted, pathAllowlisted } from './secret-scan-allowlist.ts';
+import { PUSH_SCAN_MAX_FILE_BYTES } from './page-size-policy.ts';
 import type { ScanWork } from './secret-scan-work.ts';
 export { createScanWork, type ScanWork } from './secret-scan-work.ts';
 
@@ -1106,7 +1107,7 @@ export function scanText(text: string, opts: ScanOpts = {}): SecretFinding[] {
 export const BINARY_SNIFF_BYTES = 8192;
 
 /** scanFiles skips anything larger (the push gate applies the same cap). */
-export const SCAN_MAX_FILE_BYTES = 25 * 1024 * 1024;
+export const SCAN_MAX_FILE_BYTES = PUSH_SCAN_MAX_FILE_BYTES;
 
 /** True when the first BINARY_SNIFF_BYTES of the buffer contain a NUL byte. */
 export function looksBinaryBuffer(buf: Uint8Array): boolean {

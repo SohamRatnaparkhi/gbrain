@@ -13,8 +13,9 @@ import { digest } from '../persistence/digest.ts';
 import { quoteIdentifier, resolveWriteColumnFromConfigRows, vectorCastSuffix } from '../search/embedding-column.ts';
 import { getFtsLanguage, pageSearchVectorSql } from '../fts-language.ts';
 import { getEmbeddingModel } from '../ai/gateway.ts';
+import { jsonRowBatches } from '../batch-rows.ts';
 import { refreshProjectionStatistics } from '../search/projection-statistics.ts';
-import { belowSafeChunkFence } from '../search/safe-chunks.ts';
+import { belowSafeChunkFence, movableChunkSql } from '../search/safe-chunks.ts';
 import { acceptedEmbeddingInputHashes, embeddingInputHash, plainEmbeddingTier, synopsisBodyHash,
   type EmbeddingInputContext, type EmbeddingTier } from '../embedding-input-hash.ts';
 
@@ -186,16 +187,6 @@ export async function installPageProjection(engine: BrainEngine, prepared: Proje
     ];
     if (changed.length) throw new PageProjectionConflictError(snapshot.revision, current!.revision, changed, slug, sourceId);
     if (opts.seal && opts.preserveEmbeddings) {
-      const byIndex = new Map(chunks.map(chunk => [chunk.chunk_index, chunk]));
-      const identity = (chunk: ChunkInput | Chunk) => [chunk.chunk_text, chunk.chunk_source,
-        chunk.language ?? null, chunk.symbol_name ?? null, chunk.symbol_type ?? null,
-        chunk.start_line ?? null, chunk.end_line ?? null, chunk.parent_symbol_path ?? null,
-        chunk.doc_comment ?? null, chunk.symbol_name_qualified ?? null, chunk.modality ?? 'text'];
-      const matching = stored.filter(chunk => {
-        const next = byIndex.get(chunk.chunk_index);
-        return next && digest(identity(chunk)) === digest(identity(next));
-      }).map(chunk => chunk.id);
-      await tx.executeRaw(`DELETE FROM content_chunks WHERE page_id=$1 AND NOT(id=ANY($2::int[]))`, [snapshot.page.id, matching]);
       // #5553: keep a vector only when its recorded embedding input equals the
       // input the current page would produce. A chunk with no record is kept
       // only in the pre-contextual NULL mode; explicit none may have inherited
@@ -204,15 +195,40 @@ export async function installPageProjection(engine: BrainEngine, prepared: Proje
       // nulled once and stamped by its re-embed.
       const mode = current!.page.contextual_retrieval_mode;
       const provenance = embeddingInputContext(context, current!.page.title, context.corpusGeneration, chunks);
-      const recorded = await tx.executeRaw<{ id: number; chunk_index: number; embedding_input_hash: string | null }>(
-        'SELECT id,chunk_index,embedding_input_hash FROM content_chunks WHERE page_id=$1', [snapshot.page.id]);
-      const currentInput = recorded.filter(row => row.embedding_input_hash === null ? mode == null
-        : acceptedEmbeddingInputHashes(provenance, mode, byIndex.get(Number(row.chunk_index))!).includes(row.embedding_input_hash)).map(row => Number(row.id));
-      await tx.executeRaw(`UPDATE content_chunks SET ${quoteIdentifier(context.column.name)}=NULL,
+      const col = quoteIdentifier(context.column.name);
+      const recorded = new Map((await tx.executeRaw<{ id: number; embedding_input_hash: string | null; movable: boolean }>(
+        `SELECT id,embedding_input_hash,${movableChunkSql(col)} AND model IS NOT DISTINCT FROM $2 AS movable FROM content_chunks WHERE page_id=$1`,
+        [snapshot.page.id, context.provenanceModel])).map(row => [Number(row.id), row]));
+      const currentInput = (chunk: Chunk) => {
+        const hash = recorded.get(Number(chunk.id))?.embedding_input_hash ?? null;
+        return hash === null ? mode == null : acceptedEmbeddingInputHashes(provenance, mode, chunk).includes(hash);
+      };
+      // A4: a chunk unchanged at its index stays; one the new projection holds at
+      // another index stays too when its vector is current, and upsertChunks moves
+      // the row there, so a top insert re-embeds only the chunks whose text changed.
+      const identity = (chunk: ChunkInput | Chunk) => digest([chunk.chunk_text, chunk.chunk_source,
+        chunk.language ?? null, chunk.symbol_name ?? null, chunk.symbol_type ?? null,
+        chunk.start_line ?? null, chunk.end_line ?? null, chunk.parent_symbol_path ?? null,
+        chunk.doc_comment ?? null, chunk.symbol_name_qualified ?? null, chunk.modality ?? 'text']);
+      const atIndex = new Map(chunks.map(chunk => [chunk.chunk_index, identity(chunk)]));
+      const elsewhere = new Map<string, number>();
+      for (const chunk of chunks) elsewhere.set(identity(chunk), (elsewhere.get(identity(chunk)) ?? 0) + 1);
+      const inPlace = stored.filter(chunk => atIndex.get(chunk.chunk_index) === identity(chunk));
+      for (const chunk of inPlace) elsewhere.set(identity(chunk), elsewhere.get(identity(chunk))! - 1);
+      const moved = stored.filter(chunk => {
+        const left = elsewhere.get(identity(chunk)) ?? 0;
+        if (atIndex.get(chunk.chunk_index) === identity(chunk) || left <= 0
+          || !recorded.get(Number(chunk.id))?.movable || !currentInput(chunk)) return false;
+        elsewhere.set(identity(chunk), left - 1);
+        return true;
+      });
+      const kept = [...inPlace, ...moved];
+      await tx.executeRaw(`DELETE FROM content_chunks WHERE page_id=$1 AND NOT(id=ANY($2::int[]))`, [snapshot.page.id, kept.map(chunk => chunk.id)]);
+      await tx.executeRaw(`UPDATE content_chunks SET ${col}=NULL,
         embedded_at=NULL,embedded_text_hash=NULL,embedding_input_hash=NULL,
         embedding_pending_since=COALESCE(embedding_pending_since,now()) WHERE page_id=$1 AND
         (model IS DISTINCT FROM $2 OR embedded_text_hash <> md5(chunk_text) OR NOT(id=ANY($3::int[])))`,
-      [snapshot.page.id, context.provenanceModel, currentInput]);
+      [snapshot.page.id, context.provenanceModel, kept.filter(currentInput).map(chunk => Number(chunk.id))]);
     } else if (opts.seal) await tx.deleteChunks(slug, { sourceId });
     await tx.upsertChunks(slug, chunks, { sourceId, expectedRevision: snapshot.revision, embeddingColumn: context.column });
     if (opts.code) await installCodeChunkEdges(tx, slug, sourceId, opts.code);
@@ -226,59 +242,104 @@ export async function installPageProjection(engine: BrainEngine, prepared: Proje
   });
 }
 
+/** What `installPageEmbeddings` committed. */
+export interface PageEmbeddingInstall {
+  /** Offered vectors committed (each onto every current row holding its chunk text and source). */
+  installed: number;
+  /**
+   * The page still holds the chunk set the vectors were prepared from (same
+   * indices, text and sources) and every offered vector committed, so completion stamps (the embedding
+   * signature, a title-tier restamp, an effect's completion) describe it.
+   */
+  complete: boolean;
+}
+
 /**
- * Embedding-only updates require the same chunk identities and text, too.
- * `built` names the wrapping the vectors were built under when it is not the
- * page's plain re-embed convention (the contextual service's synopsis tier and
- * its corpus generation); it is recorded with each vector.
+ * A4: a late vector commits by chunk content, not by page revision. Each
+ * offered vector lands on the current rows holding its exact chunk text and
+ * source (any id or index) when the embedding input it was built for (the
+ * captured title, tier, corpus generation and, for synopsis vectors, the
+ * captured body hash) is still the input the current page accepts
+ * (`acceptedEmbeddingInputHashes`, #5553); a vector whose chunk left the page or
+ * whose context moved (title edit, synopsis body change) is dropped. So an
+ * embed of a live, growing page converges instead of being discarded on every
+ * append. A deleted page, an archived or recreated source, another page id, an
+ * unsealed projection or a changed indexing context (model, column, mode,
+ * corpus generation) refuses everything. `built` names the wrapping the vectors
+ * were built under when it is not the page's plain re-embed convention (the
+ * contextual service's synopsis tier and the corpus generation it stamps next);
+ * that publication describes the whole page, so it installs only when complete.
+ * UPDATE-only, in bounded batches: a late embed never replaces text, chunk
+ * identity, metadata or membership.
  */
 export async function installPageEmbeddings(engine: BrainEngine, prepared: ProjectionSnapshot, chunks: ChunkInput[], signature?: string,
-  built?: { tier: EmbeddingTier; corpusGeneration?: string | null }): Promise<boolean> {
+  built?: { tier: EmbeddingTier; corpusGeneration?: string | null }): Promise<PageEmbeddingInstall> {
   const { snapshot } = prepared;
   const sourceId = snapshot.page.source_id;
   const slug = snapshot.page.slug;
+  const refused: PageEmbeddingInstall = { installed: 0, complete: false };
   return engine.transaction(async tx => {
     await tx.lockPageKeys([{ sourceId, slug }]);
     const current = await tx.readPageSnapshot(slug, { sourceId });
-    if (!current || current.page.deleted_at || current.revision !== snapshot.revision || current.sourceIncarnation !== snapshot.sourceIncarnation || current.page.id !== snapshot.page.id
-      || current.page.text_projection_revision !== current.revision) return false;
+    if (!current || current.page.deleted_at || current.sourceIncarnation !== snapshot.sourceIncarnation || current.page.id !== snapshot.page.id
+      || current.page.text_projection_revision !== current.revision) return refused;
     const [source] = await tx.executeRaw<{ archived: boolean }>('SELECT archived FROM sources WHERE id=$1', [sourceId]);
-    if (!source || source.archived) return false;
+    if (!source || source.archived) return refused;
     const context = await indexingContext(tx, current, prepared.maxChunkTokensOverride);
-    if (context.key !== prepared.indexingContext) return false;
+    if (context.key !== prepared.indexingContext) return refused;
     const stored = await tx.getChunks(slug, { sourceId, includeUnsealed: true });
-    if (stored.length !== prepared.chunks.length || stored.some((c, i) => c.id !== prepared.chunks[i].id
-      || c.chunk_index !== prepared.chunks[i].chunk_index || c.chunk_text !== prepared.chunks[i].chunk_text)) return false;
-    const byIndex = new Map(stored.map(chunk => [chunk.chunk_index, chunk]));
-    if (chunks.some(chunk => !byIndex.has(chunk.chunk_index) || byIndex.get(chunk.chunk_index)!.chunk_text !== chunk.chunk_text
-      || byIndex.get(chunk.chunk_index)!.chunk_source !== chunk.chunk_source)) return false;
+    const key = (chunk: { chunk_text: string; chunk_source?: string | null }) => `${chunk.chunk_source}\0${chunk.chunk_text}`;
+    const rows = new Map<string, number[]>();
+    for (const chunk of stored) {
+      const ids = rows.get(key(chunk));
+      if (ids) ids.push(chunk.id);
+      else rows.set(key(chunk), [chunk.id]);
+    }
     // Use the checked descriptor: config writes do not take the page guard,
     // so resolving again could send these vectors to a different model's column.
     const column = context.column;
-    const tier = built?.tier ?? plainEmbeddingTier(current.page.contextual_retrieval_mode);
-    const provenance = embeddingInputContext(context, current.page.title,
-      built?.corpusGeneration !== undefined ? built.corpusGeneration : context.corpusGeneration, stored);
-    // This is deliberately UPDATE-only: a late embed can never replace text,
-    // chunk identity, metadata, or membership in the installed projection.
+    const mode = current.page.contextual_retrieval_mode;
+    const tier = built?.tier ?? plainEmbeddingTier(mode);
+    const generation = built?.corpusGeneration !== undefined ? built.corpusGeneration : context.corpusGeneration;
+    const capturedInput = embeddingInputContext(context, snapshot.page.title, generation, prepared.chunks);
+    const currentInput = embeddingInputContext(context, current.page.title, generation, stored);
+    const accepted = new Map<string, { ids: number[]; hash: string; chunk: ChunkInput }>();
+    let installed = 0;
+    let dropped = 0;
     for (const chunk of chunks) {
       if (!chunk.embedding && !chunk.embedding_image) continue;
-      const original = byIndex.get(chunk.chunk_index)!;
-      const vector = chunk.embedding ? `[${Array.from(chunk.embedding).join(',')}]` : null;
-      const image = chunk.embedding_image ? `[${Array.from(chunk.embedding_image).join(',')}]` : null;
-      await tx.executeRaw(`UPDATE content_chunks SET
-        ${quoteIdentifier(column.name)}=CASE WHEN $2::text IS NULL THEN ${quoteIdentifier(column.name)} ELSE $2${vectorCastSuffix(column)} END,
-        embedding_image=CASE WHEN $3::text IS NULL THEN embedding_image ELSE $3::vector END,
-        embedding_input_hash=CASE WHEN $2::text IS NULL THEN embedding_input_hash ELSE $7 END,
-        embedded_at=now(),embedded_text_hash=md5(chunk_text),model=COALESCE($4,model),
-        embedding_pending_since=CASE WHEN $2::text IS NULL THEN embedding_pending_since ELSE NULL END
-        WHERE id=$1 AND page_id=$5 AND chunk_text=$6`,
+      const ids = rows.get(key(chunk));
+      const hash = embeddingInputHash(capturedInput, tier, chunk);
+      const currentHashes = built ? [embeddingInputHash(currentInput, built.tier, chunk)] : acceptedEmbeddingInputHashes(currentInput, mode, chunk);
+      if (!ids || (chunk.embedding && !currentHashes.includes(hash))) { dropped++; continue; }
+      installed++;
+      if (!accepted.has(key(chunk))) accepted.set(key(chunk), { ids, hash, chunk });
+    }
+    const complete = dropped === 0 && stored.length === prepared.chunks.length && stored.every((c, i) => c.chunk_index === prepared.chunks[i].chunk_index && c.chunk_text === prepared.chunks[i].chunk_text && c.chunk_source === prepared.chunks[i].chunk_source);
+    if (built && !complete) return refused;
+    const updates = [...accepted.values()].flatMap(({ ids, hash, chunk }) => ids.map(id => ({ id, hash, chunk })));
+    const col = quoteIdentifier(column.name);
+    for (const batch of jsonRowBatches(updates, ({ id, hash, chunk }) => ({
+      id,
+      chunk_text: chunk.chunk_text,
+      embedding: chunk.embedding ? `[${Array.from(chunk.embedding).join(',')}]` : null,
+      image: chunk.embedding_image ? `[${Array.from(chunk.embedding_image).join(',')}]` : null,
       // Bind the full provider:model captured before the provider call. Keeping
       // an old label on a new vector prevents provenance-complete migration.
-      [original.id, vector, image, chunk.model ?? (vector ? prepared.embeddingModel : null), snapshot.page.id, original.chunk_text,
-        embeddingInputHash(provenance, tier, original)]);
+      model: chunk.model ?? (chunk.embedding ? prepared.embeddingModel : null),
+      input_hash: hash,
+    }))) {
+      await tx.executeRaw(`UPDATE content_chunks SET
+        ${col}=CASE WHEN v.embedding IS NULL THEN content_chunks.${col} ELSE v.embedding${vectorCastSuffix(column)} END,
+        embedding_image=CASE WHEN v.image IS NULL THEN content_chunks.embedding_image ELSE v.image::vector END,
+        embedding_input_hash=CASE WHEN v.embedding IS NULL THEN content_chunks.embedding_input_hash ELSE v.input_hash END,
+        embedded_at=now(),embedded_text_hash=md5(content_chunks.chunk_text),model=COALESCE(v.model,content_chunks.model),
+        embedding_pending_since=CASE WHEN v.embedding IS NULL THEN content_chunks.embedding_pending_since ELSE NULL END
+        FROM jsonb_to_recordset($2::text::jsonb) AS v(id int, chunk_text text, embedding text, image text, model text, input_hash text)
+        WHERE content_chunks.id=v.id AND content_chunks.page_id=$1 AND content_chunks.chunk_text=v.chunk_text`, [snapshot.page.id, batch]);
     }
-    if (signature) await tx.setPageEmbeddingSignature(slug, { sourceId, signature });
-    return true;
+    if (signature && complete) await tx.setPageEmbeddingSignature(slug, { sourceId, signature });
+    return { installed, complete };
   });
 }
 

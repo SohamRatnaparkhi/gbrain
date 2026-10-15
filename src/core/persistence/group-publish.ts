@@ -62,6 +62,7 @@ import { decoratePublicationOutcome, finishPreparationStalled, finishUnpublished
   publishPersistenceFile, recoverPublication, type PreparedMutation } from './coordinator.ts';
 import { pipelined } from '../page-state/transactions.ts';
 import { jsonBytes } from './digest.ts';
+import { EFFECT_BYTES_SQL, retainedReceiptBytes, TRUE_UP_CLAMP_SQL } from './receipt-bytes.ts';
 import { readJournalLimits } from './limits.ts';
 import type { JournalLimits } from './model.ts';
 import { writerStamp } from './writer-versions.ts';
@@ -483,24 +484,34 @@ export async function completeGroup(tx: BrainEngine, rows: WriteRequest[], outco
     () => tx.executeRaw(ENSURE_COUNTERS_SQL, [keys]),
     () => tx.executeRaw(LOCK_COUNTERS_SQL, [keys]),
     () => tx.executeRaw<WriteRequest & { principal_key: string }>(`WITH m AS (
-        SELECT * FROM unnest($1::uuid[],$2::uuid[],$3::text[],$4::bigint[],$5::text[]) AS m(id,token,outcome,need,principal_key)
+        SELECT * FROM unnest($1::uuid[],$2::uuid[],$3::text[],$4::bigint[],$5::text[],$8::bigint[]) AS m(id,token,outcome,need,principal_key,retained)
       ), e AS (
-        SELECT request_id,SUM(octet_length(data::text)+octet_length(kind)+1024) AS bytes FROM persistence_effects WHERE request_id=ANY($1::uuid[]) GROUP BY request_id
+        SELECT request_id,SUM(${EFFECT_BYTES_SQL}) AS bytes,bool_or(state<>'committed') AS unfinished FROM persistence_effects WHERE request_id=ANY($1::uuid[]) GROUP BY request_id
+      ), prior AS (
+        SELECT r.id,r.terminal_reservation FROM persistence_requests r JOIN m ON m.id=r.id
       ), done AS (
         UPDATE persistence_requests r SET state='committed',outcome=m.outcome::jsonb,error_code=NULL,error_message=NULL,
           completed_at=now(),updated_at=now(),claim_expires_at=NULL,blocked_reason=NULL,
-          consumer_version=$6,consumer_host_id=$7::uuid,published_at=now(),preparation_attempts=0
+          consumer_version=$6,consumer_host_id=$7::uuid,published_at=now(),preparation_attempts=0,
+          terminal_reservation=CASE WHEN COALESCE(e.unfinished,false) THEN r.terminal_reservation
+            ELSE LEAST(r.terminal_reservation,m.retained+COALESCE(e.bytes,0)) END
         FROM m LEFT JOIN e ON e.request_id=m.id
         WHERE r.id=m.id AND r.execution_token=m.token AND r.state='running' AND m.need+COALESCE(e.bytes,0)<=r.terminal_reservation
         RETURNING r.*,m.principal_key
+      ), d AS (
+        SELECT k.key,count(*) AS n,SUM(done.intent_bytes) AS bytes,SUM(prior.terminal_reservation-done.terminal_reservation) AS freed
+        FROM done JOIN prior ON prior.id=done.id CROSS JOIN LATERAL (VALUES ('brain'),(done.principal_key)) AS k(key) GROUP BY k.key
       ), released AS (
-        UPDATE persistence_counters c SET outstanding_count=c.outstanding_count-d.n,intent_bytes=c.intent_bytes-d.bytes
-        FROM (SELECT k.key,count(*) AS n,SUM(done.intent_bytes) AS bytes FROM done CROSS JOIN LATERAL (VALUES ('brain'),(done.principal_key)) AS k(key) GROUP BY k.key) d
-        WHERE c.key=d.key
-      )
+        UPDATE persistence_counters c SET outstanding_count=c.outstanding_count-d.n,intent_bytes=c.intent_bytes-d.bytes,
+          terminal_bytes=c.terminal_bytes-LEAST(d.freed,c.terminal_bytes)
+        FROM d WHERE c.key=d.key
+      ), ${TRUE_UP_CLAMP_SQL('SELECT count(*) FROM d JOIN persistence_counters c ON c.key=d.key WHERE d.freed>c.terminal_bytes')}
       SELECT * FROM done`, [ids, rows.map(row => row.execution_token), outcomes.map(outcome => JSON.stringify(outcome)),
       rows.map((row, i) => jsonBytes(outcomes[i]) + jsonBytes(row.authority) + 1024),
-      rows.map(row => principalKey(requestPrincipal(row))), stamp.version, stamp.hostId]),
+      rows.map(row => principalKey(requestPrincipal(row))), stamp.version, stamp.hostId,
+      // #6696 (A1): each member's true-up target, sized down at commit once none of its effects is unfinished.
+      rows.map((row, i) => retainedReceiptBytes({ intent: row.intent, authority: row.authority, outcome: outcomes[i], error_detail: row.error_detail,
+        client_request_id: row.client_request_id }, { stage: 'terminal' }))]),
   ]) as [unknown, unknown, Array<WriteRequest & { principal_key: string }>];
   if (completed.length !== rows.length) throw new OperationError('write_claim_lost', 'A group member failed its claim or terminal-reservation check before publication.',
     'The group rolls back and its members publish one at a time, where each member reports its own outcome; inspect the requests rather than resubmitting.');

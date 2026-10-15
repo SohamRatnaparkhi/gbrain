@@ -108,10 +108,11 @@ export const DOMAIN_OF: Record<string, string> = {
   // files
   'upsertFile': 'files', 'getFile': 'files', 'listFilesForPage': 'files',
   // chunks
-  'upsertChunks': 'chunks', 'getChunks': 'chunks', 'getChunkWindows': 'chunks', 'countStaleChunks': 'chunks', 'sumStaleChunkChars': 'chunks',
+  'upsertChunks': 'chunks', 'getChunks': 'chunks', 'getChunkPage': 'chunks', 'getChunkWindows': 'chunks', 'countStaleChunks': 'chunks', 'sumStaleChunkChars': 'chunks',
   'setPageEmbeddingSignature': 'chunks', 'invalidateStaleSignatureEmbeddings': 'chunks',
   'invalidateContentDriftEmbeddings': 'chunks', 'listStaleChunks': 'chunks',
   'countChunklessPagesWithContent': 'chunks', 'listChunklessPagesWithContent': 'chunks', 'deleteChunks': 'chunks',
+  'readEmbeddingStateCounts': 'chunks', 'listEmbeddingStateRows': 'chunks',
   'getEmbeddingsByChunkIds': 'chunks', 'getChunksWithEmbeddings': 'chunks',
   // facts (incl. the ontology rows of the facts table)
   'insertFact': 'facts', 'expireFact': 'facts', 'insertFacts': 'facts', 'deleteFactsForPage': 'facts',
@@ -531,6 +532,10 @@ export const SQL_CASES: SqlCase[] = [
     ['includeUnsealed', (e) => e.getChunks(SLUG, { includeUnsealed: true })],
     ['requireSafeChunks', (e) => e.getChunks(SLUG, { requireSafeChunks: true })],
   ]),
+  ...variants('getChunkPage', [
+    ['default', (e) => e.getChunkPage(SLUG, { fromIndex: 50, limit: 50 })],
+    ['sourceIds+excludePrivate', (e) => e.getChunkPage(SLUG, { sourceIds: SRCS, excludePrivate: true, fromIndex: 0, limit: 10 })],
+  ]),
   ...variants('countStaleChunks', [
     ['default', (e) => e.countStaleChunks()],
     ['signature+sourceId', (e) => e.countStaleChunks({ signature: 'model:3', sourceId: SRC })],
@@ -564,6 +569,15 @@ export const SQL_CASES: SqlCase[] = [
   ...variants('listChunklessPagesWithContent', [
     ['default', (e) => e.listChunklessPagesWithContent()],
     ['afterPageId+sourceId', (e) => e.listChunklessPagesWithContent({ afterPageId: 3, sourceId: SRC, batchSize: 5 })],
+  ]),
+  ...variants('readEmbeddingStateCounts', [
+    ['full', (e) => e.readEmbeddingStateCounts({ mode: 'full', purgeWindowHours: 72 })],
+    ['full+sourceIds', (e) => e.readEmbeddingStateCounts({ mode: 'full', sourceIds: [SRC], purgeWindowHours: 72 })],
+    ['ops', (e) => e.readEmbeddingStateCounts({ mode: 'ops', purgeWindowHours: 72 })],
+  ]),
+  ...variants('listEmbeddingStateRows', [
+    ['default', (e) => e.listEmbeddingStateRows({ states: ['pending', 'empty'], limit: 51, purgeWindowHours: 72 })],
+    ['sourceIds', (e) => e.listEmbeddingStateRows({ sourceIds: [SRC], states: ['keyword_only'], limit: 11, purgeWindowHours: 72 })],
   ]),
   ...variants('deleteChunks', [['default', (e) => e.deleteChunks(SLUG)]]),
   ...variants('getEmbeddingsByChunkIds', [

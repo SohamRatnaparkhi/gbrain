@@ -10,7 +10,8 @@ import { basename, extname, resolve } from 'path';
 import { createHash } from 'crypto';
 import type { BrainEngine, FileSpec } from './engine.ts';
 import { classifyImportHold, parseMarkdown, resolveParsedSubtype, type ParseOpts, type ParsedMarkdown } from './markdown.ts';
-import { MAX_FILE_SIZE, screenImportContent, settleContentDisposition, stripGateOwnedMarkers, type ContentRefusal, type FenceScreen } from './import-screen.ts';
+import { CODE_FILE_MAX_BYTES, isLargePageBytes } from './page-size-policy.ts';
+import { importSizeLimit, MAX_FILE_SIZE, screenImportContent, settleContentDisposition, stripGateOwnedMarkers, type ContentRefusal, type FenceScreen } from './import-screen.ts';
 import type { WriteGateAssessment, WriteGateInput } from './write-gate.ts';
 import { applyImportFences } from './fence-repair/import-step.ts';
 import type { FenceIssueWire } from './fence-repair/tier1.ts';
@@ -631,16 +632,21 @@ export async function importFromContent(
   // it reuses inside its publication transaction, under the page guard, from
   // the chunks it is about to replace; only the chunks left without a vector
   // reach the provider.
-  const reusable = !!existing && !existing.deleted_at && !opts.forceRechunk && !opts.onPostCommitEmbedding && chunks.length > 0
+  // A large page commits with NULL vectors; the stale sweep embeds it under the
+  // per-page cap and the sampled junk check, so no provider call holds the write.
+  const noEmbed = opts.noEmbed || isEmbedSkipped(parsed.frontmatter);
+  const largePage = isLargePageBytes(Buffer.byteLength(parsed.compiled_truth, 'utf-8') + Buffer.byteLength(parsed.timeline ?? '', 'utf-8'));
+  const postCommitEmbedding = largePage ? undefined : opts.onPostCommitEmbedding;
+  const reusable = !!existing && !existing.deleted_at && !opts.forceRechunk && !postCommitEmbedding && chunks.length > 0
     && !(opts.prepare && modeRequiresSynopsis(effectiveCRMode)) && !hasProtectedBody(`${existing.compiled_truth}\n${existing.timeline ?? ''}`) && !hasProtectedBody(`${parsed.compiled_truth}\n${parsed.timeline ?? ''}`);
   const reuseCtx = { slug, sourceId: sourceId ?? 'default', title: parsed.title, corpusGeneration, tier: effectiveCRMode === 'title' ? 'title' as const : 'none' as const };
   const reuseStoredVectors = (exec: BrainEngine, into: ChunkInput[], keepUnembedded = false) => reuseStoredChunkVectors(exec, into, { ...reuseCtx, prepared: !!opts.prepare, keepUnembedded });
-  const reused = reusable && !opts.noEmbed && !opts.prepare ? await reuseStoredVectors(engine, chunks) : new Map<number, number | null>();
+  const reused = reusable && !noEmbed && !opts.prepare ? await reuseStoredVectors(engine, chunks) : new Map<number, number | null>();
 
   let embeddingPartial: EmbeddingZeroNormError | undefined;
   const embedChunks = async () => {
     const pending = chunks.map((_, i) => i).filter(i => !reused.has(i));
-    if (opts.noEmbed || pending.length === 0) return;
+    if (noEmbed || pending.length === 0) return;
     const prefix =
       modeRequiresWrapper(effectiveCRMode) && !modeRequiresSynopsis(effectiveCRMode)
         ? buildContextualPrefix(parsed.title, null)
@@ -661,8 +667,8 @@ export async function importFromContent(
   // commit with NULL vectors and no embedding signature, and the stale sweep
   // (`gbrain embed --stale`, sync's embed pass, the cycle) embeds them once
   // the provider recovers.
-  let embeddingDeferred = false;
-  if (!opts.onPostCommitEmbedding) {
+  let embeddingDeferred = largePage && !noEmbed && chunks.length > 0;
+  if (!opts.onPostCommitEmbedding && !largePage) {
     try {
       await embedChunks();
       if (embeddingPartial) {
@@ -783,7 +789,7 @@ export async function importFromContent(
           // embedded (not --no-embed), so a later model/dims swap is detectable
           // as stale via embed --stale. The deferred/backfill + per-slug embed
           // paths stamp too; this covers the inline import/sync path.
-          if (!opts.noEmbed && !opts.onPostCommitEmbedding && !embeddingDeferred) {
+          if (!noEmbed && !postCommitEmbedding && !embeddingDeferred) {
             // D9: signature is null when the gateway is unconfigured — skip the
             // stamp (a wrong signature is worse than none).
             const importSig = currentEmbeddingSignature();
@@ -837,7 +843,7 @@ export async function importFromContent(
     if (!opts.coordinated) await verifyPageReadable(tx, slug, hash, sourceId, 'importFromContent');
     await opts.beforeCommit?.(tx, slug);
     await disposition.persistReceipt(tx, { existed: !!existing });
-    if (opts.onPostCommitEmbedding && !opts.noEmbed && chunks.length > 0) {
+    if (postCommitEmbedding && !noEmbed && chunks.length > 0) {
       // Capture the complete installed projection before releasing the page
       // guard. Deferred provider results cannot replace newer text or chunks.
       persistedProjection = await readProjectionSnapshot(tx, slug, txOpts.sourceId);
@@ -869,14 +875,14 @@ export async function importFromContent(
   });
 
 
-  if (opts.onPostCommitEmbedding && !opts.noEmbed && chunks.length > 0) {
-    opts.onPostCommitEmbedding(async () => {
+  if (postCommitEmbedding && !noEmbed && chunks.length > 0) {
+    postCommitEmbedding(async () => {
       try {
         if (!persistedProjection) return { status: 'superseded' };
         const signature = currentEmbeddingSignature();
         await embedChunks();
         const installed = await installPageEmbeddings(engine, persistedProjection, chunks, embeddingPartial ? undefined : signature ?? undefined);
-        return { status: installed ? 'embedded' : 'superseded' };
+        return { status: installed.complete ? 'embedded' : 'superseded' };
       } catch {
         return { status: 'failed', error: 'Page content was saved, but embedding failed. Check the embedding provider and database on the brain host, then run gbrain embed --stale --source <source-id>.' };
       }
@@ -993,9 +999,10 @@ export async function importFromFile(
   }
 
   const stat = statSync(filePath);
-  if (stat.size > MAX_FILE_SIZE) {
+  const maxBytes = importSizeLimit(relativePath);
+  if (stat.size > maxBytes) {
     return { slug: relativePath, status: 'skipped', chunks: 0, error: `File too large (${stat.size} bytes)`,
-      refusal: { code: 'file_too_large', message: `File too large (${stat.size} bytes, max ${MAX_FILE_SIZE}).` }, skip_reason: 'file_too_large' };
+      refusal: { code: 'file_too_large', message: `File too large (${stat.size} bytes, max ${maxBytes}).` }, skip_reason: 'file_too_large' };
   }
 
   let content = readSourceFileSync(filePath, 'utf-8').replace(/^\uFEFF/, ''); // #4798: a BOM is encoding noise, not content
@@ -1194,7 +1201,7 @@ export async function importCodeFile(
   const storageContent = sanitizeText(content.replaceAll('\0', '\\0'));
 
   const byteLength = Buffer.byteLength(content, 'utf-8');
-  if (byteLength > MAX_FILE_SIZE) {
+  if (byteLength > CODE_FILE_MAX_BYTES) {
     return { slug, status: 'skipped', chunks: 0, error: `Code file too large (${byteLength} bytes)`, refusal: { code: 'file_too_large', message: `Code file too large (${byteLength} bytes)` }, skip_reason: 'file_too_large' };
   }
 

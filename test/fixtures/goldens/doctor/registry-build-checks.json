@@ -251,6 +251,34 @@
       },
       {
         "category": "ops",
+        "name": "persistence_capacity"
+      },
+      {
+        "category": "ops",
+        "name": "persistence_terminal_failures"
+      },
+      {
+        "category": "ops",
+        "name": "managed_sync_not_moving"
+      },
+      {
+        "category": "ops",
+        "name": "persistence_compaction"
+      },
+      {
+        "category": "ops",
+        "name": "serve_build_drift"
+      },
+      {
+        "category": "meta",
+        "name": "schema_pack_consistency"
+      },
+      {
+        "category": "brain",
+        "name": "embedding_state"
+      },
+      {
+        "category": "ops",
         "name": "pgvector"
       },
       {
@@ -263,7 +291,7 @@
       },
       {
         "category": "ops",
-        "name": "persistence_capacity"
+        "name": "persistence_counter_drift"
       },
       {
         "category": "brain",
@@ -407,10 +435,6 @@
       },
       {
         "category": "ops",
-        "name": "persistence_terminal_failures"
-      },
-      {
-        "category": "ops",
         "name": "persistence_session_timeouts"
       },
       {
@@ -540,6 +564,10 @@
       {
         "category": "brain",
         "name": "oversized_pages"
+      },
+      {
+        "category": "brain",
+        "name": "partial_embedding"
       },
       {
         "category": "brain",
@@ -759,10 +787,6 @@
       },
       {
         "category": "ops",
-        "name": "managed_sync_not_moving"
-      },
-      {
-        "category": "ops",
         "name": "two_consumers_on_host"
       },
       {
@@ -776,6 +800,14 @@
       {
         "category": "brain",
         "name": "extract_atoms_held_failed"
+      },
+      {
+        "category": "brain",
+        "name": "extraction_input_truncated"
+      },
+      {
+        "category": "brain",
+        "name": "ghost_pages"
       },
       {
         "category": "brain",

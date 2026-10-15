@@ -126,7 +126,7 @@ describe('C4: get_versions takes-fence redaction (#728)', () => {
       [pageId, PAGE_BODY_WITH_FENCE],
     );
 
-    const result = await dispatchToolCall(engine, 'get_versions', { slug: PAGE_SLUG }, {
+    const result = await dispatchToolCall(engine, 'get_versions', { slug: PAGE_SLUG, include_body: true }, {
       remote: true, sourceId: 'default',      takesHoldersAllowList: ['world'],
     });
     const versions = parseResult(result) as Array<{ compiled_truth: string }>;
@@ -138,7 +138,7 @@ describe('C4: get_versions takes-fence redaction (#728)', () => {
   });
 
   test('local CLI caller (no allow-list) sees full fence on every version', async () => {
-    const result = await dispatchToolCall(engine, 'get_versions', { slug: PAGE_SLUG }, {
+    const result = await dispatchToolCall(engine, 'get_versions', { slug: PAGE_SLUG, include_body: true }, {
       remote: false,
     });
     const versions = parseResult(result) as Array<{ compiled_truth: string }>;

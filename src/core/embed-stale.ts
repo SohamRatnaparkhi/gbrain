@@ -34,6 +34,7 @@ import {
 import { type DbPacer, createNoopPacer, observed } from './db-pacer.ts';
 import { resolveStaleEmbedConcurrency } from './embed-concurrency.ts';
 import { AbortError } from './abort-check.ts';
+import { meterPageBatch, spendGrant } from './page-embedding-budget.ts';
 
 /**
  * W0 fix-wave (Tier-1 #3, CONFIRMED): the ONE carry-through field list for
@@ -308,12 +309,14 @@ export async function embedStalePages(
         )).map(r => r.chunk_index),
       );
       if (staleIdx.size === 0) continue;
-      const stale = existing.filter(c => staleIdx.has(c.chunk_index));
       const pageRow = prepared.snapshot.page;
-      const embeddings = await embedFn(
+      const metered = await meterPageBatch(engine, pageRow, existing.filter(c => staleIdx.has(c.chunk_index)), { signature: opts.embeddingSignature ?? null });
+      if (!metered) continue;
+      const stale = metered.chunks;
+      const embeddings = await spendGrant(metered.grant, () => embedFn(
         wrapChunkTextsForStoredMode(pageRow, stale),
         { abortSignal: opts.signal },
-      );
+      ));
       const staleIdxToEmbedding = new Map<number, Float32Array>();
       for (let j = 0; j < stale.length; j++) {
         staleIdxToEmbedding.set(stale[j].chunk_index, embeddings[j]);
@@ -325,13 +328,14 @@ export async function embedStalePages(
         embedding: staleIdxToEmbedding.get(c.chunk_index) ?? undefined,
         token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
       }));
-      if (!await engine.transaction(async tx => {
-        if (!await installPageEmbeddings(tx, prepared, merged,
-          opts.embeddingSignature && stale.length === existing.length ? opts.embeddingSignature : undefined)) return false;
-        if (stale.length === existing.length) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, sourceId);
-        return true;
-      })) continue;
-      result.embedded += stale.length;
+      const install = await engine.transaction(async tx => {
+        const installed = await installPageEmbeddings(tx, prepared, merged,
+          opts.embeddingSignature && stale.length === existing.length ? opts.embeddingSignature : undefined);
+        if (stale.length === existing.length && installed.complete) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, sourceId);
+        return installed;
+      });
+      if (!install.complete && install.installed === 0) continue;
+      result.embedded += install.installed;
       result.pagesProcessed += 1;
     } catch (e) {
       if (opts.signal?.aborted) {
@@ -554,9 +558,12 @@ export async function embedStaleForSource(
           .map(c => ({ ...selected.get(c.chunk_index)!, ...c }));
         if (!stale.length) return;
         const pageRow = prepared.snapshot.page;
+        const metered = await meterPageBatch(engine, pageRow, existing.filter(c => !c.embedded_at), { signature });
+        if (!metered) return;
+        if (metered.grant) stale = metered.chunks.map(c => ({ ...(selected.get(c.chunk_index) ?? { source_id: keySourceId, slug, page_id: pageRow.id }), ...c }));
         await opts.assertOwned?.();
         if (stopped()) return;
-        const embeddings = await embedFn(wrapChunkTextsForStoredMode(pageRow, stale), { abortSignal: signal });
+        const embeddings = await spendGrant(metered.grant, () => embedFn(wrapChunkTextsForStoredMode(pageRow, stale), { abortSignal: signal }));
         if (stopped()) return;
         const dimensions = signature ? splitEmbeddingSignature(signature).dims
           : prepared.embeddingColumn.name === 'embedding' ? (await readContentChunksEmbeddingDim(engine)).dims : prepared.embeddingColumn.dimensions;
@@ -577,18 +584,18 @@ export async function embedStaleForSource(
         }));
         // The keyset's last batch stamps complete DB provenance (#4825),
         // with context demotion in the same transaction as its vector writes.
-        if (!await observed(pacer, () => engine.transaction(async tx => {
+        const install = await observed(pacer, () => engine.transaction(async tx => {
           await opts.assertOwned?.(tx);
           if (stopped()) throw new AbortError();
-          if (!await installPageEmbeddings(tx, prepared, merged)) return false;
+          const installed = await installPageEmbeddings(tx, prepared, merged);
           if (stamp) await stampIfPageProvenanceComplete(tx, slug, keySourceId, stamp);
-          if (stale.length === existing.length) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, keySourceId);
+          if (stale.length === existing.length && installed.complete) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, keySourceId);
           await opts.assertOwned?.(tx);
           if (stopped()) throw new AbortError();
-          return true;
-        }))) return;
-        result.embedded += stale.length;
-        result.pagesProcessed += 1;
+          return installed;
+        }));
+        result.embedded += install.installed;
+        if (install.complete || install.installed > 0) result.pagesProcessed += 1;
       } catch (e: unknown) {
         result.failures = (result.failures ?? 0) + stale.length;
         // Aborted mid-fetch is expected; treat as graceful exit.

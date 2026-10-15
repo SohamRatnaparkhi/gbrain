@@ -149,15 +149,27 @@ $fn$;`;
 export const FTS_CJK_BOUNDARY_REGEX = `${CJK_CLASS}[A-Za-z0-9]|[A-Za-z0-9]${CJK_CLASS}`;
 
 /**
+ * Characters of the page timeline the page keyword vector indexes, and of
+ * the joined timeline entries the trigger adds. A tsvector's lexeme strings
+ * cap at 1 MB; the densest text measured (hyphenated astral and CJK pairs)
+ * yields about 7.5 lexeme bytes per character under Postgres 16, so 65,536 +
+ * 32,768 characters stay under 750 KB with room for the title, while a
+ * diverse multi-MB timeline used to fail the whole page write. Chunk search
+ * still covers the full timeline.
+ */
+export const PAGE_TIMELINE_FTS_MAX_CHARS = 65_536;
+export const PAGE_TIMELINE_ENTRIES_FTS_MAX_CHARS = 32_768;
+
+/**
  * The page keyword vector every sealed writer stores: the title (weight A) and
- * the SANITIZED timeline (weight C, bound by the caller; never the raw column,
- * which can hold private or withdrawn fence text). `title` and `timeline` are
- * SQL expressions. Shared by the seal, the import seal,
- * `reindex-search-vector` and the fts-cjk-boundary migration, so they cannot
- * drift.
+ * the first PAGE_TIMELINE_FTS_MAX_CHARS characters of the SANITIZED timeline
+ * (weight C, bound by the caller; never the raw column, which can hold
+ * private or withdrawn fence text). `title` and `timeline` are SQL
+ * expressions. Shared by the seal, the import seal, `reindex-search-vector`
+ * and the fts-cjk-boundary migration, so they cannot drift.
  */
 export function pageSearchVectorSql(title: string, timeline: string, lang: string = getFtsLanguage()): string {
-  return `setweight(to_tsvector('${lang}',gbrain_fts_input(COALESCE(${title},''))),'A') || setweight(to_tsvector('${lang}',gbrain_fts_input(${timeline}::text)),'C')`;
+  return `setweight(to_tsvector('${lang}',gbrain_fts_input(COALESCE(${title},''))),'A') || setweight(to_tsvector('${lang}',gbrain_fts_input(left(${timeline}::text,${PAGE_TIMELINE_FTS_MAX_CHARS}))),'C')`;
 }
 
 /** The chunk keyword vector, over a row's own columns (`NEW.` in the trigger, bare in a backfill). */
@@ -173,7 +185,9 @@ export function chunkSearchVectorSql(lang: string, row = ''): string {
  * bodies are byte-identical to src/schema.sql's for 'english' (pinned by
  * test/fts-cjk-boundary.test.ts), so the blob replay that every boot runs
  * after a migration leaves the catalog unchanged. #2704: compiled_truth is not
- * indexed (it overflows the 1MB tsvector cap). `SET search_path = pg_catalog,
+ * indexed (it overflows the 1MB tsvector cap); the timeline and the joined
+ * entries are cut to their FTS caps for the same reason, the entries in id
+ * order so the cut is deterministic. `SET search_path = pg_catalog,
  * public` keeps the v120/#1647 hardening, which CREATE OR REPLACE would
  * otherwise reset.
  */
@@ -182,15 +196,15 @@ export function pageSearchVectorTriggerFnSql(lang: string): string {
 DECLARE
   timeline_text TEXT;
 BEGIN
-  SELECT coalesce(string_agg(summary || ' ' || detail, ' '), '')
+  SELECT coalesce(string_agg(summary || ' ' || detail, ' ' ORDER BY id), '')
   INTO timeline_text
   FROM timeline_entries
   WHERE page_id = NEW.id;
 
   NEW.search_vector :=
     setweight(to_tsvector('${lang}', gbrain_fts_input(coalesce(NEW.title, ''))), 'A') ||
-    setweight(to_tsvector('${lang}', gbrain_fts_input(coalesce(NEW.timeline, ''))), 'C') ||
-    setweight(to_tsvector('${lang}', gbrain_fts_input(coalesce(timeline_text, ''))), 'C');
+    setweight(to_tsvector('${lang}', gbrain_fts_input(left(coalesce(NEW.timeline, ''), ${PAGE_TIMELINE_FTS_MAX_CHARS}))), 'C') ||
+    setweight(to_tsvector('${lang}', gbrain_fts_input(left(coalesce(timeline_text, ''), ${PAGE_TIMELINE_ENTRIES_FTS_MAX_CHARS}))), 'C');
 
   RETURN NEW;
 END;

@@ -5,7 +5,7 @@ import { currentVerifiedLocalWriter } from './identity.ts';
 import { submissionAuthority } from './authority.ts';
 import type { OperationContext } from '../ops/contract.ts';
 import { validateSyncWireParams } from './sync-wire.ts';
-import { explicitSyncProcessing } from './sync-authority.ts';
+import { typedSyncProcessing } from './sync-authority.ts';
 import { readManagedMode } from './managed-mode.ts';
 import { trustedCliRequired } from '../ops/op-fix.ts';
 
@@ -39,7 +39,7 @@ export async function runAuthenticatedSyncSlice(engine: BrainEngine, params: Rec
         return {...result,source_id:sourceId};
       }
       const {performManagedSync}=await import('./sync-run.ts');
-      return {...await performManagedSync(engine,{...wire.options,sourceId,explicitProcessing:explicitSyncProcessing(wire.options as Record<string,unknown>),signal:controller.signal},{maxPages:25,maxMs:1000}),source_id:sourceId};
+      return {...await performManagedSync(engine,{...wire.options,sourceId,explicitProcessing:wire.options.explicitProcessing??typedSyncProcessing(wire.options),signal:controller.signal},{maxPages:25,maxMs:1000}),source_id:sourceId};
     })();
     return await work;
   } finally {if(timer)clearTimeout(timer);unregister();}

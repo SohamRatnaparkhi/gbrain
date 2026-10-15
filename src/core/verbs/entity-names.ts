@@ -16,7 +16,8 @@
 import type { BrainEngine } from '../engine.ts';
 import { entityLookupScope, readAka, selectEntityCandidates, type EntityLookupScope } from './entity-card.ts';
 import { readSiblingIdentity } from './entity-card-identity.ts';
-import { sanitizeRemoteBody } from '../remote-body.ts';
+import { boundedProjectedPrefix } from '../page-window/document.ts';
+import { boundedPrefixSql, overlaidBoundedRows } from '../page-window/bounded-lead.ts';
 import { redactFindings } from '../secret-scan.ts';
 
 export const ENTITY_NAMES_MAX = 50;
@@ -30,7 +31,7 @@ export type EntityNameRow =
 
 /** The opening prose of a page body: fences and secrets removed, headings, markers and table rows dropped, up to `max` characters. */
 export function pageLead(body: string | null, max = ENTITY_LEAD_CHARS): string {
-  const text = redactFindings(sanitizeRemoteBody(body ?? ''), { highEntropy: true }).text
+  const text = redactFindings(boundedProjectedPrefix(body), { highEntropy: true }).text
     .replace(/^---[\s\S]*?---\s*/m, '')
     .split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#') && !l.startsWith('<!--') && !l.startsWith('|'))
     .join(' ').replace(/\s+/g, ' ').trim();
@@ -64,10 +65,10 @@ async function lookupOne(engine: BrainEngine, sourceId: string, name: string, sc
   const siblingPages = identity_siblings?.pages ?? [];
   const bodies = new Map<string, string | null>([[row.slug, row.compiled_truth]]);
   if (siblingPages.length) {
-    const sib = await engine.executeRaw<{ slug: string; compiled_truth: string | null }>(
-      'SELECT slug, compiled_truth FROM pages WHERE source_id = $1 AND slug = ANY($2::text[]) AND deleted_at IS NULL',
+    const sib = await engine.executeRaw<{ slug: string; source_id: string; compiled_truth: string | null }>(
+      `SELECT slug, source_id, ${boundedPrefixSql('compiled_truth')} AS compiled_truth FROM pages WHERE source_id = $1 AND slug = ANY($2::text[]) AND deleted_at IS NULL`,
       [sourceId, siblingPages.map(p => p.slug)]).catch(() => []);
-    for (const s of sib) bodies.set(s.slug, s.compiled_truth);
+    for (const s of await overlaidBoundedRows(engine, sib)) bodies.set(s.slug, s.compiled_truth);
   }
   return {
     name, found: true, slug: row.slug, title: row.title ?? row.slug, type: row.type ?? null, aka, lead: pageLead(bodies.get(row.slug) ?? null),

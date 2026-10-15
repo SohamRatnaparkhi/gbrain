@@ -234,6 +234,14 @@
         "name": "persistence_capacity"
       },
       {
+        "category": "ops",
+        "name": "persistence_compaction"
+      },
+      {
+        "category": "ops",
+        "name": "persistence_counter_drift"
+      },
+      {
         "category": "brain",
         "name": "parked_effects"
       },

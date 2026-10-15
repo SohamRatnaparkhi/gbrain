@@ -158,12 +158,14 @@ function isSpeakerShapedHeadingLabel(label: string): boolean {
 export const DEFAULT_INTER_CALL_SLEEP_MS = 200;
 
 /**
- * Hard cap on per-page body bytes (compiled_truth + timeline). Pages
- * exceeding the cap are skipped to bound worker memory (Eng A2). A
- * streaming/per-segment-fetch path for 50MB+ iMessage histories is a
- * v0.42+ follow-up.
+ * Hard cap on the parser input's UTF-8 bytes (the summary body, or the
+ * `raw_transcript` sidecar, which is refused from its size before any read).
+ * Pages over it are skipped to bound worker memory (Eng A2) and get a durable
+ * `skipped_too_large` receipt in page_extraction_state that doctor's
+ * `extraction_input_truncated` reports. Derived from PAGE_MAX_BYTES
+ * (conversation-parser/body.ts), so it never sits below the page ceiling.
  */
-export const MAX_PAGE_BODY_BYTES = 25 * 1024 * 1024;
+export const MAX_PAGE_BODY_BYTES = CONVERSATION_BODY_MAX_BYTES;
 
 /** Default cost cap when no tracker is passed explicitly. */
 export const DEFAULT_MAX_COST_USD = 5.0;
@@ -370,7 +372,8 @@ import {
   parseConversation,
   type ParseConversationOpts as OrchestratorParseOpts,
 } from '../core/conversation-parser/parse.ts';
-import { readConversationBodyForParsing } from '../core/conversation-parser/body.ts';
+import { ConversationBodyTooLargeError, CONVERSATION_BODY_MAX_BYTES, readConversationBodyForParsing } from '../core/conversation-parser/body.ts';
+import { setExtractionReceipt } from '../core/extraction-watermark.ts';
 import { conversationSkip } from '../core/facts/conversation-skip.ts';
 import { runLlmFallback } from '../core/conversation-parser/llm-fallback.ts';
 import { resolveModel, resolveTierDefault } from '../core/model-config.ts';
@@ -526,10 +529,19 @@ function filterOutSlug(entries: string[], sourceId: string, slug: string): strin
 // Body cap (Eng A2).
 // ---------------------------------------------------------------------------
 
-function pageBodyBytes(page: Page): number {
-  const compiled = page.compiled_truth ?? '';
-  const timeline = page.timeline ?? '';
-  return Buffer.byteLength(compiled, 'utf8') + Buffer.byteLength(timeline, 'utf8');
+/** The body cap, pre-parse: a skip leaves a durable receipt (doctor: extraction_input_truncated); a page under the cap clears an earlier one. */
+async function skippedForSize(state: ExtractCoreState, snapshot: ConversationPageSnapshot): Promise<boolean> {
+  const origin = snapshot.oversizedSidecarBytes === undefined ? 'page' : 'sidecar';
+  const bytes = snapshot.oversizedSidecarBytes ?? Buffer.byteLength(snapshot.body, 'utf8');
+  const over = bytes > MAX_PAGE_BODY_BYTES;
+  if (over) {
+    state.result.pages_skipped_too_large++;
+    process.stderr.write(`[extract-conversation-facts] SKIP ${snapshot.page.slug}: ${origin === 'sidecar' ? 'raw_transcript sidecar ' : ''}`
+      + `${(bytes / 1024 / 1024).toFixed(1)}MB exceeds ${MAX_PAGE_BODY_BYTES / 1024 / 1024}MB cap\n`);
+  }
+  if (!state.dryRun) await setExtractionReceipt(state.engine, snapshot.page.id, 'conversation_facts', over
+    ? { kind: 'skipped_too_large', pipeline: 'conversation_facts', processed_chars: 0, total_bytes: bytes, cap_bytes: MAX_PAGE_BODY_BYTES, origin } : null);
+  return over;
 }
 
 // ---------------------------------------------------------------------------
@@ -706,6 +718,8 @@ interface ConversationPageSnapshot {
   page: Page;
   body: string;
   versionToken: string;
+  /** The `raw_transcript` sidecar was over the cap and not read; `body` is empty. */
+  oversizedSidecarBytes?: number;
 }
 
 function hasRawTranscriptSidecar(page: Page): boolean {
@@ -754,8 +768,13 @@ async function preparePageSnapshot(
   engine: BrainEngine,
   page: Page,
 ): Promise<ConversationPageSnapshot> {
-  const body = await readConversationBodyForParsing(engine, page);
-  return { page, body, versionToken: snapshotVersionToken(page, body) };
+  try {
+    const body = await readConversationBodyForParsing(engine, page);
+    return { page, body, versionToken: snapshotVersionToken(page, body) };
+  } catch (error) {
+    if (!(error instanceof ConversationBodyTooLargeError)) throw error;
+    return { page, body: '', versionToken: `sidecar-oversized-${error.bytes}-${error.mtimeMs}`, oversizedSidecarBytes: error.bytes };
+  }
 }
 
 function outcomeSession(source: string, slug: string, versionToken: string): string {
@@ -852,14 +871,7 @@ async function processPage(
   state.result.pages_considered++;
 
   // Body cap check first — pre-parse, pre-segment, pre-extraction.
-  const bytes = pageBodyBytes(page);
-  if (bytes > MAX_PAGE_BODY_BYTES) {
-    state.result.pages_skipped_too_large++;
-    process.stderr.write(
-      `[extract-conversation-facts] SKIP ${page.slug}: ${(bytes / 1024 / 1024).toFixed(1)}MB exceeds 25MB cap\n`,
-    );
-    return { newEndIso: null };
-  }
+  if (await skippedForSize(state, snapshot)) return { newEndIso: null };
 
   // v0.41.13.0: thread the full Page through the orchestrator so D8
   // date-derivation chain (frontmatter.date > effective_date >

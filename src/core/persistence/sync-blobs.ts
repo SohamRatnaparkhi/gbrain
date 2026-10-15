@@ -9,9 +9,10 @@
  */
 import { execFileSync } from 'node:child_process';
 import { gitChildEnv } from '../git-env.ts';
+import { PAGE_MAX_BYTES } from '../page-size-policy.ts';
 
-/** The sync read bound (`readSyncFile`): bigger files are held without being read. */
-export const SYNC_READ_BOUND = 10 * 1024 ** 2;
+/** The sync read bound (`readSyncFile`): bigger files are held without being read. The page ceiling (page-size-policy.ts), which also covers MAX_IMAGE_BYTES. */
+export const SYNC_READ_BOUND = PAGE_MAX_BYTES;
 
 export interface TreeBlob { oid: string; size: number }
 

@@ -18,7 +18,7 @@ import type { BrainEngine } from '../../core/engine.ts';
 import { serr } from '../../core/console-prefix.ts';
 import { currentCompanyBrainSync } from '../../core/company-brain/profile.ts';
 import { RECOVERY_VERSION } from '../../core/frontmatter-recovery.ts';
-import { MAX_FILE_SIZE, contentRefusalFromReceipt, isContentRefusal, type ContentRefusal } from '../../core/import-screen.ts';
+import { importSizeLimit, contentRefusalFromReceipt, isContentRefusal, type ContentRefusal } from '../../core/import-screen.ts';
 import { slugConflictHoldMessage, type ImportResult } from '../../core/import-file.ts';
 import { classifyImportHold, parseMarkdown } from '../../core/markdown.ts';
 import { readSourceFileSync } from '../../core/minions/source-filesystem.ts';
@@ -85,7 +85,7 @@ export async function openLegacyHolds(engine: BrainEngine, sourceId: string | un
 
 /** sha256 of the exact string legacy import reads (BOM stripped), or null when the file is over the size limit. */
 function readImportContent(filePath: string): { content: string; upstreamVersion: string } | null {
-  if (lstatSync(filePath).size > MAX_FILE_SIZE) return null;
+  if (lstatSync(filePath).size > importSizeLimit(filePath)) return null;
   const content = readSourceFileSync(filePath, 'utf-8').replace(/^\uFEFF/, '');
   return { content, upstreamVersion: createHash('sha256').update(content).digest('hex') };
 }
@@ -138,7 +138,7 @@ export function screenLegacyFile(filePath: string, relPath: string, activePack?:
   } catch {
     return { refusal: null, upstreamVersion: null };
   }
-  if (!read) return { refusal: { code: 'file_too_large', message: `File too large (${lstatSync(filePath).size} bytes, max ${MAX_FILE_SIZE}).` }, upstreamVersion: null };
+  if (!read) return { refusal: { code: 'file_too_large', message: `File too large (${lstatSync(filePath).size} bytes, max ${importSizeLimit(filePath)}).` }, upstreamVersion: null };
   if (hasMalformedPathSegment(relPath) || isCodeFilePath(relPath)) return { refusal: null, upstreamVersion: read.upstreamVersion };
   const parsed = parseMarkdown(read.content, relPath, { validate: true, ...(activePack ? { activePack } : {}) });
   const refusal = classifyImportHold(parsed, { expectedSlug: slugifyPath(relPath) || null, slugConflictMessage: (_found, expected) => slugConflictHoldMessage(relPath, expected) });

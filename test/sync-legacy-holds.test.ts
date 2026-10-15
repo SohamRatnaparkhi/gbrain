@@ -23,6 +23,7 @@ import { makeGitFixture } from './helpers/git-fixture.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { PAGE_MAX_BYTES } from '../src/core/page-size-policy.ts';
 
 const backends = testBackends();
 const engines: BrainEngine[] = [];
@@ -139,7 +140,7 @@ test('incremental: a refused commit is held, fixing it imports and clears the ho
 test('slug conflicts and over-size files are held, and a slug conflict re-screens every run', () => eachEngine(async () => {
   const { id, root } = await source({ 'notes/a.md': good('Alpha') });
   await sync(id, root);
-  write(root, { 'notes/spoof.md': '---\ntitle: Spoof\nslug: notes/a\n---\nBody.\n', 'notes/huge.md': `---\ntitle: Huge\n---\n${'x'.repeat(5_100_000)}\n` });
+  write(root, { 'notes/spoof.md': '---\ntitle: Spoof\nslug: notes/a\n---\nBody.\n', 'notes/huge.md': `---\ntitle: Huge\n---\n${'x'.repeat(PAGE_MAX_BYTES + 100_000)}\n` });
   const result = await sync(id, root);
   expect(result.status).toBe('synced');
   expect(await lastCommit(id)).toBe(git(root, 'rev-parse', 'HEAD'));

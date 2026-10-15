@@ -301,7 +301,7 @@ test('consolidation retains a bounded semantic intent and honors configured admi
     await seed(engine, sourceId);
     await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
     const limits = await readJournalLimits(engine);
-    expect(limits.principalIntentBytes).toBe(32 * 1024 ** 2);
+    expect(limits.principalIntentBytes).toBe(64 * 1024 ** 2);
     expect(limits.brainIntentBytes).toBe(256 * 1024 ** 2);
     const key = 'persistence.limits.principal_intent_bytes';
     const original = await engine.getConfig(key);

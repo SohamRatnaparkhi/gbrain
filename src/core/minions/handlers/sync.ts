@@ -80,10 +80,32 @@ export function makeSyncHandler(engine: BrainEngine): MinionHandler {
     // aborts only the worker's shutdown signal, so the sync and its git pull stop on either signal.
     const { composeAbortSignals } = await import('../../sync-reconcile.ts');
     const signal = composeAbortSignals(job.signal, job.shutdownSignal);
+    // #6706: a managed sync drains its catch-up instead of landing one page per job, bounded by the queue's own deadline for
+    // this job less a reserve, and by its abort signal. Classic, connector and company-brain syncs ignore `drain`.
+    const { planJobDrain, jobDrainProgress, settleJobDrain } = await import('./sync-job-drain.ts');
+    const plan = await planJobDrain(engine, job);
+    const progress = jobDrainProgress(job, (await import('../../persistence/sync-drain.ts')).drainEstimate);
+    // #6706: one drainer per source. A tick, retry or delayed continuation that starts while another sync job for the same
+    // source is live completes as a skip (the dispatcher's maxPending does not see delayed rows), like the lock-busy skip below.
+    // A continuation ignores its own parent, which stays active until the worker records the parent's completion.
+    // Classic syncs keep master's per-source lock and its skip; only a managed drain takes this guard.
+    if (plan.opts.drain && await (await import('../../persistence/managed-mode.ts')).readManagedMode(engine).catch(() => false)) {
+      const [live] = await engine.executeRaw<{ id: number | string }>(`SELECT id FROM minion_jobs WHERE name='sync' AND status='active' AND lock_until > now() AND id <> $1 AND id <> $3
+        AND (started_at, id) < (SELECT started_at, id FROM minion_jobs WHERE id = $1)
+        AND (COALESCE(data->>'sourceId', data->>'source_id')=$2 OR (COALESCE(data->>'sourceId', data->>'source_id') IS NULL AND ($4::text IS NULL AND $2='default' OR data->>'repoPath'=$4))) LIMIT 1`,
+        [job.id, sourceId ?? 'default', typeof job.data.continuation_of === 'number' ? job.data.continuation_of : -1, repoPath ?? null]).catch(() => []);
+      if (live) {
+        console.error(`[sync] skipped: sync job #${live.id} is already draining ${sourceId ?? 'default'}.`);
+        return { skipped: true, reason: 'sync_in_progress', source_id: sourceId ?? 'default', running_job_id: Number(live.id),
+          next: { command: `gbrain jobs get ${live.id} --json`, safe_to_loop: true, retry_after_ms: 30_000, why: `Sync job #${live.id} is draining source ${sourceId ?? 'default'}; it resumes the cursor, so nothing else needs to run.` } };
+      }
+    }
     let result;
     try {
       result = await performSync(engine, {
         repoPath, sourceId, noPull, noEmbed, noExtract, signal,
+        ...plan.opts,
+        ...(plan.opts.drain ? { onProgress: progress.onProgress } : {}),
         explicitProcessing: explicitSyncProcessing(job.data),
         concurrency: concurrencyOverride,
         ...(githubItem ? { githubItem } : {}),
@@ -157,6 +179,8 @@ export function makeSyncHandler(engine: BrainEngine): MinionHandler {
       embedSkipReason = 'no_new_content';
     }
 
-    return { ...result, embed_job_id: embedJobId, embed_skip_reason: embedSkipReason };
+    await progress.flush();
+    const drained = await settleJobDrain(engine, job, result, sourceId ?? 'default', plan);
+    return { ...result, ...drained, embed_job_id: embedJobId, embed_skip_reason: embedSkipReason };
   };
 }

@@ -234,7 +234,7 @@ for (const kind of ['stdio', 'http'] as const) {
 
     test('same-slug content readers and history retain public data and exclude private rows', async () => {
       for (const name of ['get_page', 'get_chunks', 'get_raw_data', 'get_timeline', 'get_versions']) {
-        const { result, body } = await call(name, { slug: SHARED });
+        const { result, body } = await call(name, { slug: SHARED, ...(name === 'get_versions' ? { include_body: true } : {}) });
         expect(JSON.stringify(body)).toContain(PUBLIC);
         for (const hidden of [PRIVATE, PRIVATE_FACT, PRIVATE_TAKE]) expect(JSON.stringify(result)).not.toContain(hidden);
         if (name === 'get_versions') {
@@ -266,7 +266,7 @@ for (const kind of ['stdio', 'http'] as const) {
       await openSession(true);
       const { body: privateChunks } = await call('get_chunks', { slug: 'notes/private-only' });
       expect(JSON.stringify(privateChunks)).toContain(PRIVATE);
-      const { result, body } = await call('get_versions', { slug: SHARED });
+      const { result, body } = await call('get_versions', { slug: SHARED, include_body: true });
       expect(JSON.stringify(body)).toContain(PUBLIC);
       expect(JSON.stringify(result)).not.toContain(PRIVATE_FACT);
       expect(JSON.stringify(result)).not.toContain(PRIVATE_TAKE);

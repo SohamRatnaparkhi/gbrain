@@ -765,6 +765,9 @@ semantics: removing a materialized timeline bullet removes its timeline row.
 
 Success returns the committed receipt with the new `revision` and `diff`, a
 unified diff of your view capped at 8 KB (`diff_truncated: true` when cut).
+On a large page only the changed region is diffed; when that region is over
+4 million old-by-new line pairs the diff is one hunk replacing it whole and
+the receipt says `diff_coarse: true`.
 Refusals name the edit and never include protected text:
 
 | Error | `detail` | Fix |
@@ -790,7 +793,7 @@ Refusals name the edit and never include protected text:
 
 From the CLI: `gbrain call edit_page '{"slug":"projects/example","expected_revision":"…","edits":[{"old_text":"…","new_text":"…"}]}'`.
 
-### context_pack(entities, budget_tokens?, since?, session_id?, include_private?) — read, zero LLM
+### context_pack(entities, budget_tokens?, since?, session_id?, include_private?, counterparty?, intent?) — read, zero LLM
 
 One deterministic, budget-packed bundle for a set of standing
 entities — entity cards + open threads + hot facts. Built for **session
@@ -808,7 +811,7 @@ lockstep, and is honored ONLY for trusted-local callers (`remote === false`); a
 remote caller never widens (fail-closed).
 
 Response: `{ protocol_version, entities, cards[], open_threads[], facts[], text,
-degraded_reason?, budget_tokens?, budget_used?, dropped_count?, core?, pinned_questions?, withheld? }`. `text` is the
+degraded_reason?, budget_tokens?, budget_used?, dropped_count?, core?, pinned_questions?, withheld?, brief? }`. `text` is the
 envelope-wrapped injectable block, rendered from the packed sets within `budget_tokens`.
 
 `entities` scopes cards and threads, not the hot facts (the session's recent
@@ -823,6 +826,27 @@ always-loaded core block (owner-designated pages loaded in every session,
 [core memory](../guides/core-memory.md)) when core memory is on and not empty.
 `text` starts with the core block, and core tokens count inside
 `budget_tokens`. `entities` may be omitted to fetch core alone.
+
+#### context_pack brief: `counterparty`, `intent` (additive)
+
+`counterparty` (a person or company name, or an exact page slug) asks for a
+pulled brief of at most three dated items about them; `intent` (`meeting` |
+`reply`, optional) labels the task. Without `counterparty` the response is
+unchanged. The brief is pull, not push, and says so: `text` gains a
+`## Before you start (pulled on request)` block after the core block, counted
+inside `budget_tokens`, and the response gains
+`brief: { delivery: "pull", intent, counterparty: { slug, display } | null,
+items: [{ id, kind, date, due?, slug, source_id, text, counterparty,
+confidence }], withheld_arms?, reason? }`.
+
+A name resolves only on the alias or title arm at ≥ 0.8, to a person or company
+page, never through a common word. An unresolved name returns
+`reason: "counterparty_unresolved"` and no items; an invalid `intent` is
+`invalid_params`. Items are open loops (`L<id>`, trusted-local callers only;
+remote callers get `withheld_arms: ["loops"]`) and the newest dated fact
+(`F<id>`). Visibility follows the `include_private` rule above, with
+private-provenance facts excluded unless widened. The same assembler serves
+the off-by-default hook push ([push context](../guides/push-context.md)).
 
 ### delta(since?, since_slug?, cursor?, entities?, budget_tokens?, session_id?, include_private?) — read, zero LLM
 

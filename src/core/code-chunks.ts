@@ -1,7 +1,7 @@
 import type { BrainEngine } from './engine.ts';
 import type { ChunkInput, CodeEdgeInput } from './types.ts';
 import { chunkCodeTextFull } from './chunkers/code.ts';
-import { findChunkForOffset, type ExtractedEdge } from './chunkers/edge-extractor.ts';
+import { chunkLocator, type ExtractedEdge } from './chunkers/edge-extractor.ts';
 import { sanitizeRemoteBody } from './remote-body.ts';
 import { credentialSafeProjection } from './credential-projection.ts';
 import { isEmbedSkipped } from './embed-skip.ts';
@@ -47,8 +47,9 @@ export function mapCodeEdges(edges: ExtractedEdge[], content: string,
   ranges: Array<{ id?: number; startLine: number; endLine: number; symbol_name_qualified?: string | null }>,
   sourceId: string): CodeEdgeInput[] {
   const out: CodeEdgeInput[] = [];
+  const locate = chunkLocator(content, ranges);
   for (const edge of edges) {
-    const index = findChunkForOffset(edge.callSiteByteOffset, content, ranges);
+    const index = locate(edge.callSiteByteOffset);
     const from = index === null ? undefined : ranges[index];
     if (!from?.id || !from.symbol_name_qualified) continue;
     out.push({ from_chunk_id: from.id, to_chunk_id: null, from_symbol_qualified: from.symbol_name_qualified,

@@ -86,7 +86,8 @@ export function costMatrixSentence(): string {
 /** How `query` and `search` expand, stated once. */
 export const QUERY_EXPANSION_LINE =
   '`gbrain query` expands only when the mode says so (off in conservative and balanced, on in tokenmax); ' +
-  '--expand forces it and --no-expand skips it. `gbrain search` never expands. An expansion is one call to the ' +
+  '--expand forces it and --no-expand skips it. `gbrain config set search.expansion false` turns the default off for ' +
+  'the brain in any mode (true turns it on; an explicit --expand still wins). `gbrain search` never expands. An expansion is one call to the ' +
   'configured chat model, a separate provider charge; keyless brains never expand.';
 
 /** The picker's reason for each recommendation branch. */

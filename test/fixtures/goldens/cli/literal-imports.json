@@ -150,6 +150,7 @@
         "./commands/reindex.ts",
         "./commands/reindex-multimodal.ts",
         "./core/sync-concurrency.ts",
+        "./core/oversized-backfill.ts",
         "./commands/reindex-vectors.ts",
         "./commands/reindex-aliases.ts",
         "./commands/reindex.ts",
