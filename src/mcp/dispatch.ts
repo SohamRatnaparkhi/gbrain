@@ -1121,8 +1121,7 @@ export async function dispatchToolCall(
     if (opts.transport === 'stdio' && opts.remote !== false) { const drain = takeFactsDrainNotice(); if (drain) notices.push(drain); } // Lane D facts drain
     notices.push(...await sessionSafetyNotices(engine, opts, ctx.config));
     notices.push(...await grantBlockedNotices(engine, opts, false));
-    const out: ToolResult = toolResultWithNotices(result, admitNotices(notices, opts), dispatchRenderContext(opts));
-    applyHydraMarkdown(out, result, responseMeta, opts.transport);
+    const out: ToolResult = applyHydraMarkdown(toolResultWithNotices(result, admitNotices(notices, opts), dispatchRenderContext(opts)), result, responseMeta, opts.transport);
     if (evidenceBlocks.length > 0) out.content.splice(1, 0, ...evidenceBlocks.map(text => ({ type: 'text' as const, text })));
     if (opts.transport === 'stdio') {
       maybeRefreshBackupStatusInProcess(engine);
