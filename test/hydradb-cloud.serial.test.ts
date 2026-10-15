@@ -18,7 +18,7 @@ import { unpackToolResult } from '../src/core/mcp-client.ts';
 import { dispatchToolCall } from '../src/mcp/dispatch.ts';
 import { HYDRADB_API_KEY_ENV, HYDRADB_CONFIG, hydraDocId, resolveHydraConnection, saveHydraApiKey } from '../src/core/hydradb.ts';
 import { hydraPrimarySearch } from '../src/core/search/hydra-primary.ts';
-import { mirrorBrain } from '../src/core/hydradb-mirror.ts';
+import { mirrorBrain, scheduleCloudPush } from '../src/core/hydradb-mirror.ts';
 import { uploadBenchmarkCorpus } from '../evals/cloud-memory/ingest.ts';
 import { runCloud } from '../src/commands/cloud.ts';
 import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
@@ -37,6 +37,7 @@ const cloud = {
   docs: new Map<string, CloudDoc>(),
   calls: [] as string[],
   queries: [] as Array<Record<string, unknown>>,
+  uploads: [] as string[],
   fail: false,
   responseExtras: {} as Record<string, unknown>,
 };
@@ -66,7 +67,8 @@ async function fakeHydra(input: string | URL | Request, init?: RequestInit): Pro
       const items = JSON.parse(String(form.get('document_metadata')));
       if (files.length !== items.length) return reply(null, 400);
       for (const [i, item] of items.entries()) {
-        cloud.docs.set(item.id, { id: item.id, title: files[i]!.name.replace(/\.md$/, ''), markdown: await files[i]!.text(), meta: item.additional_metadata });
+        const markdown = await files[i]!.text(); cloud.uploads.push(markdown);
+        cloud.docs.set(item.id, { id: item.id, title: files[i]!.name.replace(/\.md$/, ''), markdown, meta: item.additional_metadata });
       }
       return reply({ failed_count: 0, results: items.map((item: { id: string }) => ({ id: item.id, status: 'queued' })) }, 202);
     }
@@ -118,6 +120,15 @@ const connectAll = async () => {
   await engine.setConfig(HYDRADB_CONFIG.primary, 'true');
 };
 const conn = { database: 'gbrain', apiKey: 'hk_test.secret' };
+// Import deliberately discards user-forged gate markers. Model a persisted
+// gate-owned marker from an older brain, with its keyword chunks intact.
+async function markSkipped(source: string, slug: string) {
+  await engine.executeRaw(
+    "UPDATE pages SET frontmatter = jsonb_set(frontmatter, '{embed_skip}', $3::text::jsonb), updated_at = now() - interval '1 minute' WHERE source_id = $1 AND slug = $2",
+    [source, slug, JSON.stringify({ reason: 'oversized' })]);
+  const chunks = await engine.getChunks(slug, { sourceId: source, includeUnsealed: true });
+  await installFixtureChunks(engine, slug, chunks.map(c => ({ chunk_index: c.chunk_index, chunk_text: c.chunk_text, chunk_source: c.chunk_source })), { sourceId: source });
+}
 const cloudDoc = (source: string, slug: string, markdown: string) =>
   cloud.docs.set(hydraDocId(source, slug), { id: hydraDocId(source, slug), title: slug, markdown, meta: { gbrain_source: source, gbrain_slug: slug } });
 
@@ -150,12 +161,57 @@ beforeEach(async () => {
   cloud.docs.clear();
   cloud.calls = [];
   cloud.queries = [];
+  cloud.uploads = [];
   cloud.fail = false; cloud.responseExtras = {};
   await disconnectAll();
   _resetCliExitVerdictForTests();
 });
 
 describe('mirror', () => {
+  test('embed-skipped keyword pages never reach cloud backfill or benchmark ingestion', async () => {
+    const source = await newSource(engine), slug = 'notes/excluded';
+    try {
+      await putPage(engine, source, slug, page('note', 'Excluded', 'EXCLUDED_CLOUD_CANARY'));
+      await markSkipped(source, slug);
+      expect((await engine.getPage(slug, { sourceId: source }))!.frontmatter.embed_skip).toBeDefined();
+      expect((await engine.getChunks(slug, { sourceId: source })).length).toBeGreaterThan(0);
+      await mirrorBrain(engine, conn, { full: true });
+      expect(cloud.docs.has(hydraDocId(source, slug))).toBe(false);
+      expect(cloud.uploads.join('\n')).not.toContain('EXCLUDED_CLOUD_CANARY');
+      const calls = cloud.calls.length;
+      await expect(uploadBenchmarkCorpus(engine, conn, [source], 1, () => {})).rejects.toThrow('empty outgoing projection');
+      expect(cloud.calls.slice(calls)).toEqual([]);
+    } finally {
+      await engine.executeRaw('DELETE FROM pages WHERE source_id = $1', [source]);
+      await engine.executeRaw('DELETE FROM sources WHERE id = $1', [source]);
+    }
+  });
+
+  test('marking a mirrored page embed-skipped deletes its cloud copy without uploading the edit', async () => {
+    const source = await newSource(engine), slug = 'notes/newly-excluded';
+    try {
+      await connectAll();
+      await putPage(engine, source, slug, page('note', 'Initially public', 'Public before exclusion.'));
+      await drainAllBackgroundWorkForCliExit();
+      await mirrorBrain(engine, conn, { full: true });
+      expect(cloud.docs.has(hydraDocId(source, slug))).toBe(true);
+      await disconnectAll();
+      const before = await engine.getPage(slug, { sourceId: source });
+      await putPage(engine, source, slug, page('note', 'Now excluded', 'NEWLY_EXCLUDED_CLOUD_CANARY'), before!.knowledge_revision);
+      await markSkipped(source, slug);
+      await connectAll();
+      scheduleCloudPush(engine, { source_id: source, slug });
+      await drainAllBackgroundWorkForCliExit();
+      await mirrorBrain(engine, conn, { full: true });
+      expect(cloud.docs.has(hydraDocId(source, slug))).toBe(false);
+      expect(cloud.uploads.join('\n')).not.toContain('NEWLY_EXCLUDED_CLOUD_CANARY');
+      expect((await engine.getChunks(slug, { sourceId: source })).length).toBeGreaterThan(0);
+    } finally {
+      await engine.executeRaw('DELETE FROM pages WHERE source_id = $1', [source]);
+      await engine.executeRaw('DELETE FROM sources WHERE id = $1', [source]);
+    }
+  });
+
   test('sends the embedding projection: no private page, no private fact row, no secret', async () => {
     const r = await mirrorBrain(engine, conn);
     expect(r.upserted).toBe(4);

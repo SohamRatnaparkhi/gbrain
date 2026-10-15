@@ -21,6 +21,7 @@ import type { ProgressReporter } from './progress.ts';
 import { horizonIso, toMicroIso } from './context/delta-cursor.ts';
 import { prepareFenceAwareMarkdownChunks } from './markdown-chunks.ts';
 import { isPrivatePage } from './search/private-visibility.ts';
+import { isEmbedSkipped } from './embed-skip.ts';
 import { redactFindings } from './secret-scan.ts';
 import { HYDRADB_CONFIG, hasHydraKey, hydraDocId, hydraDocMetadata, resolveHydraConnection, type HydraConnection } from './hydradb.ts';
 import { ingestHydra, deleteHydra } from './hydradb-transfer.ts';
@@ -45,8 +46,8 @@ interface PageRef { source_id: string; slug: string }
  * the prose, with every secret the scanner finds redacted: unlike an embedding
  * call, the cloud keeps the text (same rule as the Memorable relay).
  */
-async function projection(engine: BrainEngine, page: Page): Promise<string> {
-  if (isPrivatePage(page)) return '';
+export async function hydraProjection(engine: BrainEngine, page: Page): Promise<string> {
+  if (isPrivatePage(page) || isEmbedSkipped(page.frontmatter)) return '';
   const chunks = await prepareFenceAwareMarkdownChunks(engine, page.source_id, page.slug, page);
   const text = chunks.filter((c) => c.chunk_source !== 'fenced_code').map((c) => c.chunk_text).join('\n\n').trim();
   return redactFindings(text, { highEntropy: true }).text;
@@ -89,7 +90,7 @@ async function sync(engine: BrainEngine, conn: HydraConnection, pages: Page[], r
       removals.push(page);
       continue;
     }
-    const text = await projection(engine, page);
+    const text = await hydraProjection(engine, page);
     if (text) upserts.push({ page, text });
     else removals.push(page);
   }

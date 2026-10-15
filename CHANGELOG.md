@@ -40,6 +40,7 @@ image similarity and symbol walks keep their existing local contracts.
 - Add opt-in cloud connection, status, indexed backfill, write-through syncing and disconnect commands.
 - Route keyless recall and both hybrid search entry points through the selected cloud backend.
 - Preserve source, type, date, slug and pagination filters without running local relevance ranking.
+- Keep embed-skipped pages local while preserving keyword search, and withhold unsafe or unmatched stored text in chunk-centered reads.
 - Verify per-item ingestion, indexing and deletion outcomes before advancing mirror cursors.
 - Keep page identities distinct across sources and retry interrupted batches.
 - Reconcile archived/restored sources, expand schema type aliases in cloud searches, serialize PostgreSQL uploads across processes, and preserve shared credentials when one brain disconnects.

@@ -1,6 +1,6 @@
 /** Benchmark setup only: production page projection and verified ingestion, bounded parallel batches. */
 import type { BrainEngine } from '../../src/core/engine.ts';
-import { prepareFenceAwareMarkdownChunks } from '../../src/core/markdown-chunks.ts';
+import { hydraProjection } from '../../src/core/hydradb-mirror.ts';
 import { isPrivatePage } from '../../src/core/search/private-visibility.ts';
 import { redactFindings } from '../../src/core/secret-scan.ts';
 import { hydraDocId, hydraDocMetadata, type HydraConnection } from '../../src/core/hydradb.ts';
@@ -25,8 +25,7 @@ export async function uploadBenchmarkCorpus(engine: BrainEngine, conn: HydraConn
         for (const ref of batch) {
           const page = await engine.getPage(ref.slug, { sourceId: ref.source_id });
           if (!page || isPrivatePage(page)) throw new Error('The benchmark corpus contains a missing or private page.');
-          const chunks = await prepareFenceAwareMarkdownChunks(engine, ref.source_id, ref.slug, page);
-          const text = redactFindings(chunks.filter(c => c.chunk_source !== 'fenced_code').map(c => c.chunk_text).join('\n\n').trim(), { highEntropy: true }).text;
+          const text = await hydraProjection(engine, page);
           if (!text) throw new Error('The benchmark corpus contains an empty outgoing projection.');
           const title = redactFindings(page.title || page.slug, { highEntropy: true }).text;
           form.append('documents', new Blob([`# ${title}\n\n${text}\n`], { type: 'text/markdown' }), `${title.replace(/[\\/\x00-\x1f]/g, ' ').slice(0, 120)}.md`);

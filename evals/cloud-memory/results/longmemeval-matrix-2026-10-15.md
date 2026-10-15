@@ -73,5 +73,6 @@ Dataset: [LongMemEval](https://github.com/xiaowu0162/LongMemEval), [cleaned S da
 - Dataset SHA-256: `d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442`.
 - Selected-id list SHA-256: `8cd8a2d38b99552ae6e45b88f42baf80d61f09161e288024d21a2091e1d000af`.
 - Measured application: `cfe16c9b848b345e817e0a1a032d0d12e0afb4ad`, version `0.60.227.0`; results are not fresh timing claims for subsequent upstream changes.
+- Measured harness source is preserved in commit `c9d0f09d7`. The current upload helper shares the production exclusion policy; this public corpus contains no embed-skipped pages and the recorded measurements are unchanged.
 - Harness SHA-256 (`ab.ts`, `ingest.ts`, `matrix.ts`, joined with newlines): `cbbee445ce36e381ad4fcddd5961dc3cf807186b1c8b554d7c25cb087fc0c8ef`.
 - Run started: `2026-10-14T18:35:43.124Z`; all 1,080 observations and cleanup completed.
